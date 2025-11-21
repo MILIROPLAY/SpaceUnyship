@@ -1,0 +1,3796 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Jeu de Tir 2D (Futuriste)</title>
+    
+    <!-- Import Firebase modules -->
+    <script type="module">
+        // --- Configuration Firebase (NE PAS MODIFIER) ---
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        // CORRECTION: Suppression des imports Google Auth, retour à l'anonyme/token
+        import { getAuth, signInWithCustomToken, onAuthStateChanged, setPersistence, inMemoryPersistence, signInAnonymously } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        // --- Importation des fonctions Firestore nécessaires ---
+        import { getFirestore, doc, getDoc, setDoc, onSnapshot, setLogLevel, collection, query, where, limit, orderBy, addDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js"; // NOUVEAU: addDoc, deleteDoc
+
+        // --- Variables Globales Firebase ---
+        let app, auth, db;
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+
+        // --- Initialisation ---
+        try {
+            app = initializeApp(firebaseConfig);
+            auth = getAuth(app);
+            db = getFirestore(app);
+            // setLogLevel('debug');
+            
+            // Attacher les instances et les fonctions Firestore à 'window'
+            window.db = db;
+            window.auth = auth;
+            window.appId = appId;
+            window.doc = doc; 
+            window.getDoc = getDoc; 
+            window.setDoc = setDoc; 
+            window.onSnapshot = onSnapshot; 
+            window.collection = collection; 
+            window.query = query; 
+            window.where = where; 
+            window.limit = limit; 
+            window.orderBy = orderBy; 
+            window.addDoc = addDoc; // NOUVEAU
+            window.deleteDoc = deleteDoc; // NOUVEAU
+
+            // Définir une fonction d'initialisation d'authentification globale
+            // CORRECTION: Retour à la connexion auto (token ou anonyme)
+            window.initAuth = async () => {
+                await setPersistence(auth, inMemoryPersistence);
+                
+                return new Promise((resolve, reject) => {
+                    const unsubscribe = onAuthStateChanged(auth, (user) => {
+                        if (user) {
+                            console.log("Auth state changed: User is signed in.", user.uid);
+                            unsubscribe();
+                            resolve(user); // Renvoie l'utilisateur complet
+                        } else {
+                             // Si pas d'utilisateur, tenter la connexion
+                            console.log("Auth state changed: User is signed out. Attempting sign-in...");
+                            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                                signInWithCustomToken(auth, __initial_auth_token)
+                                    .catch(err => {
+                                        console.error("Token sign-in failed, falling back to anonymous", err);
+                                        signInAnonymously(auth).catch(reject); // Tenter en anonyme si le token échoue
+                                    });
+                            } else {
+                                // Pas de token, connexion anonyme
+                                console.log("No token, signing in anonymously.");
+                                signInAnonymously(auth).catch(reject);
+                            }
+                        }
+                    }, reject);
+                });
+            };
+
+            // NOUVEAU: Exposer la fonction de connexion Google (SUPPRIMÉE)
+            // window.signInWithGoogle = ...
+
+        } catch (error) {
+            console.error("Erreur d'initialisation de Firebase:", error);
+            document.body.innerHTML = "Erreur de connexion à la base de données. Veuillez actualiser.";
+        }
+    </script>
+    
+    <!-- NOUVEAU: Importation de Tone.js pour le son -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+
+    <style>
+        /* --- NOUVEAU: STYLE FUTURISTE --- */
+        
+        /* Animation pour l'arrière-plan des menus */
+        @keyframes animateGrid {
+            0% { background-position: 0 0; }
+            100% { background-position: 60px 60px; }
+        }
+        
+        body, html {
+            margin: 0; padding: 0; overflow: hidden;
+            background-color: #000; color: white;
+            font-family: 'Consolas', 'Menlo', 'Monaco', monospace;
+            -webkit-user-select: none; user-select: none;
+            
+            /* Fond de base (visible en jeu) */
+            background-image: linear-gradient(to right, rgba(255, 255, 255, 0.05) 1px, transparent 1px), 
+                              linear-gradient(to bottom, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+            background-size: 30px 30px;
+        }
+        
+        /* Appliquer l'animation SEULEMENT si le menu est actif */
+        body.menu-active {
+            animation: animateGrid 4s linear infinite;
+        }
+
+        canvas { 
+            display: none; 
+            background-color: transparent; /* CORRECTION: Le canvas est transparent par-dessus le body */
+            position: absolute;
+            top: 0; left: 0;
+            z-index: 1; /* Derrière les menus */
+        }
+        
+        @keyframes pulseGlow {
+            0% { text-shadow: 0 0 5px #ffffff, 0 0 8px #ffffff; opacity: 0.8; }
+            50% { text-shadow: 0 0 8px #ffffff, 0 0 15px #ffffff; opacity: 1; }
+            100% { text-shadow: 0 0 5px #ffffff, 0 0 8px #ffffff; opacity: 0.8; }
+        }
+        
+        @keyframes turretGlow {
+            0% { background: #ffff00; }
+            50% { background: #555; }
+            100% { background: #ffff00; }
+        }
+
+        /* NOUVEAU: Style des menus "Verre" */
+        .screen {
+            position: absolute; top: 50%; left: 50%;
+            transform: translate(-50%, -50%); 
+            z-index: 30; /* Au-dessus du canvas */
+            
+            /* Effet "Glace/Miroir" */
+            background: rgba(0, 15, 20, 0.7); /* Fond très sombre, légèrement cyan */
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            
+            /* Forme futuriste (coins coupés) */
+            border: 1px solid #ffffff;
+            box-shadow: 0 0 20px rgba(255, 255, 255, 0.3);
+            clip-path: polygon(0 15px, 15px 0, 100% 0, 100% calc(100% - 15px), calc(100% - 15px) 100%, 0 100%);
+            
+            padding: 30px;
+            text-align: left;
+            font-size: 1.2em;
+        }
+
+        .screen h1 {
+            font-size: 1.5em;
+            color: #ffffff; /* NOUVEAU: Couleur blanche */
+            animation: pulseGlow 2s infinite;
+            text-align: left;
+            margin-bottom: 25px;
+            letter-spacing: 2px;
+            text-shadow: 0 0 10px #ffffff; /* NOUVEAU: Lueur blanche */
+        }
+
+        .screen h1::before {
+            content: "// ";
+            color: #888;
+        }
+
+        /* NOUVEAU: Style des boutons futuristes */
+        .screen button, #upgrade-panel button {
+            background: rgba(255, 255, 255, 0.05); /* Fond très subtil */
+            border: 1px solid #ffffff; /* Bordure blanche */
+            color: #eee;
+            padding: 10px 15px;
+            margin-top: 10px;
+            font-family: inherit;
+            font-size: 0.8em;
+            cursor: pointer;
+            text-transform: uppercase;
+            transition: all 0.2s ease;
+            text-align: left;
+            width: 100%;
+            position: relative;
+            box-sizing: border-box;
+            
+            /* Forme (coins coupés différents) */
+            clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
+        }
+        
+        /* Retrait des crochets [ ] */
+        .screen button::before, #upgrade-panel button::before {
+            content: ""; margin: 0;
+        }
+        .screen button::after, #upgrade-panel button::after {
+            content: ""; margin: 0;
+        }
+        
+        .screen button:hover, #upgrade-panel button:hover {
+            background: rgba(255, 255, 255, 0.2); /* Fond au survol */
+            color: #fff;
+            border-color: #ffffff;
+            box-shadow: 0 0 15px #ffffff; /* Lueur au survol */
+        }
+        
+        .screen button:disabled, #upgrade-panel button:disabled {
+            color: #444;
+            border-color: #444;
+            background: rgba(0, 0, 0, 0.5);
+            cursor: not-allowed;
+            box-shadow: none;
+            clip-path: none; /* Désactiver la forme si désactivé */
+        }
+        
+        /* Style des champs de saisie */
+        #player-name-input, #platform-select, #language-select {
+            padding: 10px;
+            margin-bottom: 10px;
+            border-radius: 0;
+            border: 1px solid #ffffff;
+            background: #111;
+            color: white;
+            font-size: 0.8em;
+            width: 90%;
+            font-family: inherit;
+            clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 10px 100%, 0 calc(100% - 10px));
+        }
+
+        #user-id-display { font-size: 0.5em; color: #888; margin-top: 20px; }
+        
+        /* --- NOUVEAU: Style de la Boutique --- */
+        #shop-screen { 
+            display: none; width: 400px; 
+            max-height: 80vh; /* Permet le scroll */
+            overflow-y: auto; /* Scroll vertical */
+        }
+        #shop-screen .points-display { font-size: 1.2em; color: #fff; margin-bottom: 15px; }
+        /* Conteneur pour le bouton + la prévisualisation */
+        .shop-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border: 1px solid #888;
+            margin-top: 10px;
+            transition: all 0.2s ease;
+            cursor: pointer;
+        }
+        .shop-item:hover {
+            background: rgba(255, 255, 255, 0.2); /* NOUVEAU: Survol */
+            border-color: #ffffff;
+            box-shadow: 0 0 10px #ffffff;
+        }
+        .shop-item:hover .shop-button-text {
+            color: #fff; /* NOUVEAU: Couleur survol */
+        }
+        
+        .shop-item.disabled {
+             opacity: 0.5;
+             cursor: not-allowed;
+             background: #222;
+             border-color: #444;
+        }
+        .shop-item.disabled:hover {
+             background: #222;
+             border-color: #444;
+             box-shadow: none;
+        }
+         .shop-item.disabled:hover .shop-button-text {
+             color: #eee;
+         }
+        
+        .shop-button-text {
+            color: #eee;
+            padding: 10px 15px;
+            font-family: inherit;
+            font-size: 0.8em;
+            text-transform: uppercase;
+            text-align: left;
+            flex-grow: 1;
+        }
+        /* Retrait des crochets [ ] */
+        .shop-button-text::before { content: ""; margin: 0; }
+        .shop-button-text::after { content: ""; margin: 0; }
+        
+        .skin-preview {
+            width: 50px;
+            height: 50px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding-right: 15px;
+        }
+        .preview-ship {
+            width: 0;
+            height: 0;
+            /* Triangle */
+            border-left: 10px solid transparent;
+            border-right: 10px solid transparent;
+            border-bottom: 20px solid #eee;
+            position: relative;
+        }
+        .preview-ship.blue { border-bottom-color: #0088ff; }
+        .preview-ship.red { border-bottom-color: #ff4444; }
+        
+        /* NOUVEAU: Prévisualisation de la taille du vaisseau */
+        .preview-ship.size-1 { transform: scale(1.0); }
+        .preview-ship.size-2 { transform: scale(1.2); }
+        .preview-ship.size-3 { transform: scale(1.4); }
+
+        .turret-light {
+            width: 4px;
+            height: 4px;
+            background: #ffff00;
+            border-radius: 50%;
+            position: absolute;
+            animation: turretGlow 1s infinite;
+        }
+        .turret-light.left { top: 10px; left: -8px; }
+        .turret-light.right { top: 10px; left: 4px; }
+        /* --- Fin Style Boutique --- */
+
+
+        
+        #game-over-screen { 
+            border-color: #ffffff; /* NOUVEAU: Accent Blanc */
+            /* Utilise le style .screen par défaut */
+        }
+        #game-over-screen h1 { 
+            color: #ffffff; /* NOUVEAU: Accent Blanc */
+            animation: none; 
+            text-shadow: 0 0 10px #ffffff;
+        }
+        #game-over-screen h1::before { content: "// "; color: #ffffff; } /* NOUVEAU: Accent Blanc */
+        
+        .game-ui { display: none; position: absolute; z-index: 10; }
+        
+        /* NOUVEAU: Style UI en jeu "Glace" */
+        #ui-container { 
+            top: 10px; left: 10px; 
+            font-size: 1.2em; 
+            text-shadow: 0 0 5px #fff; 
+            
+            background: rgba(0, 15, 20, 0.7);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            
+            border: 1px solid #ffffff;
+            padding: 10px;
+            width: 220px; 
+            
+            clip-path: polygon(0 0, 100% 0, 100% calc(100% - 15px), calc(100% - 15px) 100%, 0 100%);
+        }
+        
+        #score { font-size: 1.2em; font-weight: bold; color: #fff; }
+        #kill-count { font-size: 1.0em; font-weight: bold; color: #ffffff; margin-top: 5px; } /* NOUVEAU: Accent Blanc */
+        
+        #health-bar-container { 
+            width: 200px; height: 20px; background-color: #333; 
+            border: 1px solid #555; border-radius: 0; margin-top: 5px; 
+        }
+        #health-bar { 
+            width: 100%; height: 100%; background-color: #ffffff; /* NOUVEAU: Accent Blanc */
+            border-radius: 0; transition: width 0.2s; 
+        }
+        #shield-timer { color: #ffffff; font-weight: bold; margin-top: 5px; display: none; }
+        
+        /* NOUVEAU: Style Panneau d'upgrade "Glace" */
+        #upgrade-panel { 
+            position: absolute; 
+            top: 10px; 
+            right: 10px; 
+            left: auto; 
+            width: 200px; 
+            
+            background: rgba(0, 15, 20, 0.7);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            
+            border: 1px solid #ffffff; 
+            padding: 10px; 
+            font-size: 0.9em; 
+            z-index: 10;
+            
+            clip-path: polygon(0 0, 100% 0, 100% 100%, 15px 100%, 0 calc(100% - 15px));
+        }
+        
+        /* NOUVEAU: Bouton Menu en jeu (style normal) */
+        #back-to-menu-button {
+            margin-top: 10px;
+            border-color: #aaa; /* Gris neutre */
+            color: #aaa;
+        }
+        #back-to-menu-button:hover {
+            background: rgba(255, 255, 255, 0.2);
+            color: #fff;
+            border-color: #fff;
+            box-shadow: 0 0 10px #fff;
+        }
+
+        /* --- NOUVEAU: Style des Joysticks --- */
+        #controls-container { display: none; /* Caché par défaut, géré par JS */ }
+        
+        .joystick-area {
+            position: absolute;
+            width: 150px;
+            height: 150px;
+            z-index: 10;
+            display: none; /* Caché par défaut */
+        }
+        
+        /* Joystick de Mouvement (au-dessus du classement) */
+        #movement-joystick-area {
+            bottom: 120px; /* Positionné au-dessus du classement */
+            left: 20px;
+        }
+        
+        /* Joystick d'Action (en bas à droite) */
+        #action-joystick-area {
+            bottom: 30px;
+            right: 30px;
+        }
+        
+        .joystick-base {
+            position: absolute;
+            width: 100px;
+            height: 100px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 2px solid #ffffff;
+            border-radius: 50%;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            display: none; /* Caché jusqu'au 'touch' */
+        }
+        
+        .joystick-stick {
+            position: absolute;
+            width: 60px;
+            height: 60px;
+            background: rgba(255, 255, 255, 0.4);
+            border-radius: 50%;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            display: none; /* Caché jusqu'au 'touch' */
+        }
+        /* --- FIN NOUVEAU: Style Joysticks --- */
+        
+        /* Mini-Map SUPPRIMÉE */
+        #minimap-container {
+           display: none !important;
+        }
+
+        #leaderboard-table {
+            width: 100%;
+            margin-top: 20px;
+            border-collapse: collapse;
+            font-size: 0.6em; /* Plus petit pour le style terminal */
+            border: 1px solid #333;
+        }
+        #leaderboard-table th {
+            background-color: #222;
+            padding: 8px;
+            text-align: left;
+            color: #fff;
+            font-weight: normal;
+        }
+        #leaderboard-table td {
+            padding: 8px;
+            border-bottom: 1px solid #333;
+            text-align: left;
+        }
+        #leaderboard-table tr:nth-child(even) {
+            background-color: rgba(255, 255, 255, 0.05);
+        }
+        .crown { color: #fff; font-size: 1.2em; margin-right: 5px; } /* Couronne blanche pour le style monochrome */
+
+        /* NOUVEAU: Classement en jeu (Déplacé en bas à gauche) */
+        #ingame-leaderboard-container {
+            bottom: 20px; /* MODIFIÉ: 'top: 150px;' en 'bottom: 20px;' */
+            left: 20px;
+            width: 220px;
+            
+            /* NOUVEAU: Style Glace */
+            background: rgba(0, 15, 20, 0.7);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid #ffffff;
+            
+            padding: 5px;
+            font-size: 0.7em;
+            clip-path: polygon(15px 0, 100% 0, 100% 100%, 0 100%, 0 15px);
+        }
+        #ingame-leaderboard-container h3 {
+            font-size: 1em;
+            color: #fff;
+            margin: 0 0 5px 0;
+            padding-bottom: 5px;
+            border-bottom: 1px solid #ffffff; /* NOUVEAU: Accent Blanc */
+        }
+        #ingame-leaderboard-body {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        #ingame-leaderboard-body li {
+            padding: 3px 0;
+            white-space: nowrap;
+        }
+
+        /* NOUVEAU: Alerte d'événement (Style futuriste) */
+        @keyframes alertPulse {
+            0% { transform: translateX(-50%) scale(1); opacity: 0; }
+            10% { transform: translateX(-50%) scale(1.05); opacity: 1; }
+            90% { transform: translateX(-50%) scale(1.05); opacity: 1; }
+            100% { transform: translateX(-50%) scale(1); opacity: 0; }
+        }
+        
+        .event-ui {
+            display: none; /* Caché par défaut */
+            position: absolute;
+            top: 20%; /* Plus bas que l'UI */
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 50; /* Au-dessus de tout */
+            font-size: 2.5em;
+            font-weight: bold;
+            color: #ff0000; /* Rouge alerte */
+            text-shadow: 0 0 10px #ff0000, 0 0 20px #fff;
+            padding: 20px;
+            background: rgba(50, 0, 0, 0.7); /* Garder le rouge pour l'alerte */
+            border: 2px solid #ff0000;
+            text-align: center;
+            animation: alertPulse 5s forwards; 
+            clip-path: polygon(0 15px, 15px 0, 100% 0, 100% calc(100% - 15px), calc(100% - 15px) 100%, 0 100%);
+        }
+        
+        /* NOUVEAU: Alerte de succès (verte) */
+        .event-ui.success {
+            color: #00ff00; /* Vert vif */
+            text-shadow: 0 0 10px #00ff00, 0 0 20px #fff;
+            background: rgba(0, 50, 0, 0.7); /* Fond vert sombre */
+            border: 2px solid #00ff00;
+        }
+        
+        /* NOUVEAU: Barre de vie du Boss */
+        #boss-health-container {
+            display: none; /* Caché par défaut */
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 50%; /* 50% de la largeur de l'écran */
+            max-width: 500px;
+            height: 25px;
+            background-color: #333;
+            border: 2px solid #ff0000;
+            z-index: 20;
+            padding: 2px;
+        }
+        #boss-health-bar-fill {
+            width: 100%;
+            height: 100%;
+            background-color: #ff0000;
+            transition: width 0.3s ease;
+        }
+        #boss-health-container::before {
+            content: '!! BOSS DETECTE !!';
+            position: absolute;
+            top: -20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #ff0000;
+            font-size: 0.8em;
+            text-shadow: 0 0 5px #fff;
+        }
+        
+        /* NOUVEAU: Style pour le slider de volume */
+        #settings-screen .setting-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 15px;
+            font-size: 0.8em;
+        }
+        
+        #volume-slider {
+            -webkit-appearance: none;
+            width: 60%;
+            height: 8px;
+            background: #555;
+            outline: none;
+            border: 1px solid #ffffff; /* NOUVEAU: Accent Blanc */
+        }
+        
+        #volume-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            background: #eee;
+            border: 1px solid #ffffff; /* NOUVEAU: Accent Blanc */
+            cursor: pointer;
+            clip-path: polygon(0 5px, 5px 0, 100% 0, 100% calc(100% - 5px), calc(100% - 5px) 100%, 0 100%);
+        }
+        #volume-slider::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            background: #eee;
+            border: 1px solid #ffffff; /* NOUVEAU: Accent Blanc */
+            cursor: pointer;
+            border-radius: 0;
+        }
+        
+    </style>
+</head>
+<body>
+
+    <!-- Écrans -->
+    <div id="menu-screen" class="screen" style="display: block;">
+        <h1 data-lang="title_connect">// Astro-Survie // Connexion</h1>
+        <!-- NOUVEAU: Champ de nom et choix de plateforme (simplifié) -->
+        <input type="text" id="player-name-input" placeholder="[ENTRER NOM DE PILOTE]" data-lang-placeholder="placeholder_name">
+        <select id="platform-select" style="padding: 8px; margin-bottom: 10px; background: #111; color: white; border-radius: 0; font-size: 0.8em; width: 98%; border: 1px solid #555; font-family: inherit;">
+            <option value="pc" data-lang="type_pc">TYPE: PC (Clavier)</option>
+            <option value="mobile" data-lang="type_mobile">TYPE: MOBILE (Tactile)</option>
+        </select>
+        <!-- Fin NOUVEAU -->
+        
+        <button id="play-button" disabled data-lang="play_solo">Jouer en Solo</button> 
+        <button id="shop-button" disabled data-lang="shop">Boutique</button>
+        <button id="multiplayer-button" disabled data-lang="online">Joueurs en Ligne (0)</button>
+        <!-- NOUVEAU: Bouton Paramètres -->
+        <button id="settings-button" style="border-color: #aaa; color: #aaa;" data-lang="settings">[ PARAMÈTRES ]</button>
+        
+        <div id="user-id-display" data-lang="loading">CHARGEMENT SESSION...</div>
+
+        <!-- NOUVEAU: Tableau de Score -->
+        <table id="leaderboard-table">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th data-lang="leaderboard_player">Pilote</th>
+                    <th data-lang="leaderboard_score">Score</th>
+                </tr>
+            </thead>
+            <tbody id="leaderboard-body">
+                <tr><td colspan="3" data-lang="leaderboard_loading">SCAN RÉSEAU...</td></tr>
+            </tbody>
+        </table>
+    </div>
+    <div id="shop-screen" class="screen">
+        <h1 data-lang="title_shop">Boutique // Arsenal</h1>
+        <div id="shop-points-display" class="points-display">Points : 0</div>
+
+        <!-- NOUVEAU: Boutiques avec Prévisualisation -->
+        <div id="buy-skin-blue" class="shop-item">
+            <span class="shop-button-text" data-lang="shop_skin_blue" data-lang-cost="shop_cost">Skin Viper (Coût: 500)</span>
+            <div class="skin-preview">
+                <div class="preview-ship blue"></div>
+            </div>
+        </div>
+
+        <div id="buy-skin-red" class="shop-item">
+            <span class="shop-button-text" data-lang="shop_skin_red" data-lang-cost="shop_cost">Skin Baron (Coût: 1000)</span>
+            <div class="skin-preview">
+                <div class="preview-ship red"></div>
+            </div>
+        </div>
+
+        <div id="buy-auto-turret" class="shop-item">
+            <span class="shop-button-text" data-lang="shop_turret" data-lang-cost="shop_cost">Auto-Tourelle (Coût: 2000)</span>
+            <div class="skin-preview">
+                <div class="preview-ship">
+                    <div class="turret-light left"></div>
+                    <div class="turret-light right"></div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- NOUVEAU: Améliorations déplacées ici -->
+        <h3 style="margin-top:20px; font-size: 0.8em; color: #888;" data-lang="shop_permanent">// AMÉLIORATIONS PERMANENTES</h3>
+        
+        <div id="buy-ship-speed" class="shop-item">
+            <span class="shop-button-text" data-lang="upgrade_shipSpeed" data-lang-cost="shop_cost">Vitesse V. (Coût: 100)</span>
+        </div>
+        <div id="buy-bullet-speed" class="shop-item">
+            <span class="shop-button-text" data-lang="upgrade_bulletSpeed" data-lang-cost="shop_cost">Vitesse T. (Coût: 100)</span>
+        </div>
+        <div id="buy-fire-rate" class="shop-item">
+            <span class="shop-button-text" data-lang="upgrade_fireRate" data-lang-cost="shop_cost">Cadence (Coût: 100)</span>
+        </div>
+        <div id="buy-max-health" class="shop-item">
+            <span class="shop-button-text" data-lang="upgrade_maxHealth" data-lang-cost="shop_cost">Vie Max (Coût: 150)</span>
+        </div>
+        <div id="buy-ship-size" class="shop-item">
+            <span class="shop-button-text" data-lang="upgrade_shipSize" data-lang-cost="shop_cost">Taille Vaisseau (Coût: 500)</span>
+            <div class="skin-preview">
+                <div class="preview-ship size-2"></div>
+            </div>
+        </div>
+        <div id="buy-bullet-damage" class="shop-item">
+            <span class="shop-button-text" data-lang="upgrade_bulletDamage" data-lang-cost="shop_cost">Dégâts Tirs (Coût: 300)</span>
+        </div>
+        <div id="buy-health-regen" class="shop-item">
+            <span class="shop-button-text" data-lang="upgrade_healthRegen" data-lang-cost="shop_cost">Régénération (Coût: 1000)</span>
+        </div>
+
+        <button id="shop-back-button" style="margin-top: 20px;" data-lang="back">Retour</button>
+    </div>
+    
+    <!-- NOUVEAU: Écran des Paramètres -->
+    <div id="settings-screen" class="screen" style="display: none; width: 400px;">
+        <h1 data-lang="title_settings">// PARAMÈTRES</h1>
+        
+        <!-- NOUVEAU: Sélecteur de langue -->
+        <div class="setting-item">
+            <span data-lang="language">Langue</span>
+            <select id="language-select" style="padding: 8px; background: #111; color: white; border-radius: 0; font-size: 1em; border: 1px solid #ffffff; font-family: inherit; clip-path: none; width: 60%;">
+                <option value="fr">Français</option>
+                <option value="en">English</option>
+                <option value="es">Español</option>
+                <option value="ja">日本語</option>
+                <option value="zh">中文</option>
+            </select>
+        </div>
+        
+        <div class="setting-item">
+            <span data-lang="volume">VOLUME AUDIO</span>
+            <!-- Min -50dB (silence), Max 0dB (normal) -->
+            <input type="range" id="volume-slider" min="-50" max="0" step="1">
+        </div>
+        
+        <div class="setting-item">
+            <button id="toggle-particles-button" data-lang="particles">Particules: OUI</button>
+        </div>
+
+        <!-- NOUVEAU: Bouton Musique -->
+        <div class="setting-item">
+            <button id="toggle-music-button" data-lang="music">Musique: OUI</button>
+        </div>
+
+        <button id="settings-back-button" style="margin-top: 30px;" data-lang="back">Retour</button>
+    </div>
+    
+    <div id="ui-container" class="game-ui">
+        <div id="score">Points : 0</div>
+        <div id="kill-count">// KILLS: 0</div> <!-- NOUVEAU -->
+        <div id="health-bar-container"><div id="health-bar"></div></div>
+        <div id="shield-timer">Bouclier: 5.0s</div>
+    </div>
+    
+    <!-- NOUVEAU: Barre de vie du Boss (Globale) -->
+    <div id="boss-health-container" class="game-ui">
+        <div id="boss-health-bar-fill"></div>
+    </div>
+
+    <div id="game-over-screen" class="screen">
+        <h1 data-lang="game_over">CONNEXION PERDUE</h1>
+        <div id="final-score-display" style="font-size: 0.8em; margin-bottom: 15px;"></div>
+        <button id="restart-button" data-lang="back_menu">RETOUR MENU</button>
+    </div>
+    <canvas id="gameCanvas"></canvas>
+    
+    <!-- Mini-Map SUPPRIMÉE -->
+    
+    <!-- Panneau d'upgrade en jeu RESTAURÉ -->
+    <div id="upgrade-panel" class="game-ui">
+        <button id="upgrade-fire-rate" data-lang="upgrade_fireRate">Cadence (Coût: 100)</button>
+        <button id="upgrade-ship-speed" data-lang="upgrade_shipSpeed">Vitesse V. (Coût: 100)</button>
+        <button id="upgrade-bullet-speed" data-lang="upgrade_bulletSpeed">Vitesse T. (Coût: 100)</button>
+        <button id="upgrade-max-health" data-lang="upgrade_maxHealth">Vie Max (Coût: 150)</button>
+        <button id="back-to-menu-button" data-lang="back_menu">Menu Principal</button>
+    </div>
+    
+    <!-- NOUVEAU: Alerte d'événement (Succès) -->
+    <div id="event-success" class="event-ui">ÉVÉNEMENT TERMINÉ</div>
+    
+    <!-- NOUVEAU: Alerte d'événement -->
+    <div id="event-alert" class="event-ui">ALERTE ÉVÉNEMENT</div>
+    
+    <!-- NOUVEAU: Classement en jeu -->
+    <div id="ingame-leaderboard-container" class="game-ui">
+        <h3 data-lang="leaderboard_ingame">// TOP 3 PILOTES</h3>
+        <ul id="ingame-leaderboard-body">
+            <li data-lang="loading_simple">CHARGEMENT...</li>
+        </ul>
+    </div>
+    
+    <!-- NOUVEAU: Conteneurs pour les Joysticks (remplace l'ancien #controls-container) -->
+    <div id="movement-joystick-area" class="joystick-area">
+        <div id="movement-joystick-base" class="joystick-base"></div>
+        <div id="movement-joystick-stick" class="joystick-stick"></div>
+    </div>
+    <div id="action-joystick-area" class="joystick-area">
+        <div id="action-joystick-base" class="joystick-base"></div>
+        <div id="action-joystick-stick" class="joystick-stick"></div>
+    </div>
+
+
+    <!-- Lecteur audio MP3 SUPPRIMÉ -->
+    <!-- <audio id="background-music" src="http://googleusercontent.com/file_content/1" loop></audio> -->
+
+    <script>
+        // --- Références Firebase ---
+        let db, auth, userId, appId;
+        let dbGameDataRoot, dbUserDataRoot; // NOUVEAU: Chemins de base de données
+        
+        // --- NOUVEAU: Variables de Son ---
+        let shootSound, explosionSound, hitSound, music, alienShootSound, buttonSound; // NOUVEAU: buttonSound
+        let mainVolume; // NOUVEAU: Contrôleur de volume principal
+        let audioReady = false;
+
+        // --- Variables Globales de Jeu ---
+        let canvas, ctx;
+        let miniMapCanvas, miniMapCtx; // miniMapCtx est maintenant null, mais on laisse les refs
+        let player; 
+        let bullets = [], asteroids = [], aliens = [], particles = [], stars = [], powerUps = [];
+        let bruteAliens = []; // NOUVEAU: Ennemis "Brute"
+        let bosses = []; // NOUVEAU: Liste des Boss
+        let debris = []; 
+        let laserWalls = []; // NOUVEAU: Murs laser du Boss
+        let otherPlayers = []; 
+        let leaderboardData = []; 
+        let isHost = false; // NOUVEAU: Variable pour le multijoueur
+        
+        // NOUVEAU: Listeners pour le monde synchronisé
+        let unsubscribePlayers = null; 
+        let unsubscribeWorldObjects = null;
+        let unsubscribeRemovals = null;
+        let unsubscribeLeaderboard = null; // CORRECTION: Variable manquante
+        let unsubscribeCurrentEvent = null; // NOUVEAU
+        
+        let gameIsOver = false;
+        let gameState = 'LOADING'; 
+        
+        // NOUVEAU: Variables d'événement
+        let eventTimer = 120000; // CORRECTION: Premier événement après 2 min (120000 ms)
+        const EVENT_INTERVAL_MIN = 180000; // CORRECTION: 3 min
+        const EVENT_INTERVAL_MAX = 300000; // CORRECTION: 5 min
+        let currentEvent = null;
+        let invasionKillsNeeded = 0; // NOUVEAU: Compteur pour l'invasion
+        
+        // NOUVEAU: Paramètres de jeu
+        let gameSettings = {
+            particlesEnabled: true,
+            volume: -10, // Volume par défaut (-10 dB)
+            musicEnabled: true, // NOUVEAU
+            language: 'fr' // NOUVEAU
+        };
+        
+        // Identifiant de session unique pour le multijoueur
+        const sessionId = `${Date.now()}-${Math.floor(Math.random() * 10000)}`; 
+        
+        // UI elements
+        let scoreElement, healthBarElement, shieldTimerElement, gameOverElement, killCountElement;
+        let upgradeFireRateBtn, upgradeShipSpeedBtn, upgradeBulletSpeedBtn, upgradeMaxHealthBtn; // Restauré
+        let menuScreen, shopScreen, playButton, shopButton, shopBackButton, restartButton;
+        let googleSignInButton; // NOUVEAU
+        let settingsScreen, volumeSlider, toggleParticlesButton, settingsButton, settingsBackButton, toggleMusicButton, languageSelect; // NOUVEAU
+        let shopPointsDisplay, buySkinBlueBtn, buySkinRedBtn, buyAutoTurretBtn;
+        let buyShipSpeedBtn_shop, buyBulletSpeedBtn_shop, buyFireRateBtn_shop, buyMaxHealthBtn_shop, buyShipSizeBtn; // Noms de boutique
+        let buyBulletDamageBtn, buyHealthRegenBtn;
+        let finalScoreDisplay, playerNameInput, multiplayerButton, leaderboardBody, ingameLeaderboardBody, backToMenuButton; // backToMenuButton restauré
+        let eventAlertElement; // NOUVEAU
+        let eventSuccessElement; // NOUVEAU
+        let bossHealthBarElement, bossHealthBarFillElement; // NOUVEAU
+        
+        // NOUVEAU: UI des Joysticks
+        let moveArea, moveBase, moveStick, actionArea, actionBase, actionStick;
+        let moveTouchId = null, actionTouchId = null;
+        let moveStartPos = { x: 0, y: 0 }, actionStartPos = { x: 0, y: 0 };
+        const maxJoyRadius = 50; // Rayon max de déplacement du stick
+        const joyThreshold = 20; // Seuil pour activer
+        
+        // Game settings
+        const MAP_SIZE = 3000; 
+        const MAP_BOUND_RADIUS = 1400; 
+        const GAME_SPEED = 0.7; // Vitesse de jeu globale unifiée
+        const BOSS_SPAWN_SCORE = 15000; // CORRECTION: Apparition beaucoup plus rare (15k points)
+        const BRUTE_SPAWN_SCORE = 1000; // NOUVEAU
+        let bossSpawned = false; 
+        let bruteSpawned = false; // NOUVEAU
+        
+        let numAsteroids = 50, numStars = 150; 
+        let lastShotTime = 0, alienSpawnTimer = 0, powerUpSpawnTimer = 0;
+        let meteoriteSpawnTimer = 0; // NOUVEAU
+        const METEORITE_SPAWN_INTERVAL = 5000; // NOUVEAU: Spawn de météorites toutes les 5 secondes
+        let bruteAlienSpawnTimer = 0; // NOUVEAU
+        let autoTurretTimer = 0; 
+        let lastLeaderboardUpdateTime = 0; // NOUVEAU
+        const playerTurnSpeed = 0.03; // CORRECTION: Vitesse de rotation rapide (0.03)
+        const alienSpawnInterval = 15000; 
+        const bruteAlienSpawnInterval = 45000; // NOUVEAU: 45 secondes
+        const powerUpSpawnInterval = 30000; // CORRECTION: 30 secondes (au lieu de 10)
+        const POWERUP_MAX_LIFE = 60000; 
+        const autoTurretFireRate = 1000; 
+        const SHIELD_DURATION = 20000; 
+        const controlState = { thrust: false, left: false, right: false, shoot: false };
+        const defaultSaveData = {
+            score: 0, 
+            killCount: 0,
+            skin: 'default', 
+            hasAutoTurret: false,
+            upgrades: { 
+                level: 0, 
+                health: 100, 
+                speed: 4.0 * GAME_SPEED, // CORRECTION: Vitesse augmentée
+                bulletSpeed: 10 * GAME_SPEED, // CORRECTION: Vitesse de tir (10)
+                fireRate: 400, 
+                radius: 15, 
+                bulletDamage: 50, 
+                healthRegen: 0
+            }, 
+            upgradeCosts: { 
+                fireRate: 100, 
+                shipSpeed: 100, 
+                bulletSpeed: 100, 
+                maxHealth: 150, 
+                radius: 500, 
+                bulletDamage: 300, 
+                healthRegen: 1000 
+            },
+            shopCosts: { skinBlue: 500, skinRed: 1000, autoTurret: 2000 },
+            skinsOwned: { default: true, blue: false, red: false },
+            playerName: "Pilote" + Math.floor(Math.random() * 999),
+            gameSettings: { particlesEnabled: true, volume: -10, musicEnabled: true, language: 'fr' } // NOUVEAU: musicEnabled + language
+        };
+        
+        // --- NOUVEAU: Système de Traduction ---
+        let currentLang = 'fr';
+        const translations = {
+            'fr': {
+                'title_connect': '// Astro-Survie // Connexion',
+                'title_shop': 'Boutique // Arsenal',
+                'title_settings': '// PARAMÈTRES',
+                'placeholder_name': '[ENTRER NOM DE PILOTE]',
+                'type_pc': 'TYPE: PC (Clavier)',
+                'type_mobile': 'TYPE: MOBILE (Tactile)',
+                'play_solo': 'Jouer en Solo',
+                'shop': 'Boutique',
+                'online': 'Joueurs en Ligne',
+                'settings': 'Paramètres',
+                'loading': 'Chargement Session...',
+                'loading_simple': 'CHARGEMENT...',
+                'leaderboard_player': 'Pilote',
+                'leaderboard_score': 'Score',
+                'leaderboard_loading': 'SCAN RÉSEAU...',
+                'shop_skin_blue': 'Skin Viper',
+                'shop_skin_red': 'Skin Baron',
+                'shop_turret': 'Auto-Tourelle',
+                'shop_permanent': '// AMÉLIORATIONS PERMANENTES',
+                'shop_cost': 'Coût',
+                'shop_owned': 'Possédé',
+                'shop_equipped': 'Équipé',
+                'back': 'Retour',
+                'language': 'Langue',
+                'volume': 'VOLUME AUDIO',
+                'particles': 'Particules',
+                'music': 'Musique',
+                'particles_on': 'Particules: OUI',
+                'particles_off': 'Particules: NON',
+                'music_on': 'Musique: OUI',
+                'music_off': 'Musique: NON',
+                'ui_points': '// POINTS',
+                'ui_kills': '// KILLS',
+                'ui_shield': 'Bouclier',
+                'upgrade_fireRate': 'Cadence',
+                'upgrade_shipSpeed': 'Vitesse V.',
+                'upgrade_bulletSpeed': 'Vitesse T.',
+                'upgrade_maxHealth': 'Vie Max',
+                'upgrade_shipSize': 'Taille Vaisseau',
+                'upgrade_bulletDamage': 'Dégâts Tirs',
+                'upgrade_healthRegen': 'Régénération',
+                'back_menu': 'Menu Principal',
+                'game_over': 'CONNEXION PERDUE',
+                'game_over_score': 'Vous avez ajouté {score} points à votre total.',
+                'leaderboard_ingame': '// TOP 3 PILOTES',
+                'alert_invasion': '// INVASION // OBJECTIF: {kills} KILLS',
+                'alert_invasion_remaining': '// INVASION // {kills} RESTANTS',
+                'alert_mega_brute': '// ALERTE: MEGA-BRUTE DETECTEE //',
+                'alert_ultra_boss': '// ALERTE: TITAN ULTRA DETECTE //',
+                'alert_boss': '!! BOSS DETECTE !!', // NOUVEAU
+                'alert_invasion_small': '// INVASION // OBJECTIF: {kills} KILLS',
+                'success_invasion': '// INVASION REPoussÉE //',
+                'success_wave': '// VAGUE REPoussÉE //',
+                'success_boss': '// BOSS VAINCU //',
+                'success_ultra_boss': '// TITAN ULTRA VAINCU //',
+                'success_mega_brute': '// MEGA-BRUTE ÉLIMINÉE //',
+                'level_boss': 'N.BOSS', // NOUVEAU
+                'level_ultra': 'N.ULTRA' // NOUVEAU
+            },
+            'en': {
+                'title_connect': '// Astro-Survive // Connect',
+                'title_shop': 'Shop // Arsenal',
+                'title_settings': '// SETTINGS',
+                'placeholder_name': '[ENTER PILOT NAME]',
+                'type_pc': 'TYPE: PC (Keyboard)',
+                'type_mobile': 'TYPE: MOBILE (Touch)',
+                'play_solo': 'Play Solo',
+                'shop': 'Shop',
+                'online': 'Players Online',
+                'settings': 'Settings',
+                'loading': 'Loading Session...',
+                'loading_simple': 'LOADING...',
+                'leaderboard_player': 'Pilot',
+                'leaderboard_score': 'Score',
+                'leaderboard_loading': 'SCANNING NETWORK...',
+                'shop_skin_blue': 'Viper Skin',
+                'shop_skin_red': 'Baron Skin',
+                'shop_turret': 'Auto-Turret',
+                'shop_permanent': '// PERMANENT UPGRADES',
+                'shop_cost': 'Cost',
+                'shop_owned': 'Owned',
+                'shop_equipped': 'Equipped',
+                'back': 'Back',
+                'language': 'Language',
+                'volume': 'AUDIO VOLUME',
+                'particles': 'Particles',
+                'music': 'Music',
+                'particles_on': 'Particles: ON',
+                'particles_off': 'Particles: OFF',
+                'music_on': 'Music: ON',
+                'music_off': 'Music: OFF',
+                'ui_points': '// POINTS',
+                'ui_kills': '// KILLS',
+                'ui_shield': 'Shield',
+                'upgrade_fireRate': 'Fire Rate',
+                'upgrade_shipSpeed': 'Ship Speed',
+                'upgrade_bulletSpeed': 'Bullet Speed',
+                'upgrade_maxHealth': 'Max Health',
+                'upgrade_shipSize': 'Ship Size',
+                'upgrade_bulletDamage': 'Bullet Damage',
+                'upgrade_healthRegen': 'Regeneration',
+                'back_menu': 'Main Menu',
+                'game_over': 'CONNECTION LOST',
+                'game_over_score': 'You added {score} points to your total.',
+                'leaderboard_ingame': '// TOP 3 PILOTS',
+                'alert_invasion': '// INVASION // OBJECTIVE: {kills} KILLS',
+                'alert_invasion_remaining': '// INVASION // {kills} REMAINING',
+                'alert_mega_brute': '// ALERT: MEGA-BRUTE DETECTED //',
+                'alert_ultra_boss': '// ALERT: ULTRA TITAN DETECTED //',
+                'alert_boss': '!! BOSS DETECTED !!', // NOUVEAU
+                'alert_invasion_small': '// INVASION // OBJECTIVE: {kills} KILLS',
+                'success_invasion': '// INVASION REPELLED //',
+                'success_wave': '// WAVE REPELLED //',
+                'success_boss': '// BOSS DEFEATED //',
+                'success_ultra_boss': '// ULTRA TITAN DEFEATED //',
+                'success_mega_brute': '// MEGA-BRUTE ELIMINATED //',
+                'level_boss': 'L.BOSS', // NOUVEAU
+                'level_ultra': 'L.ULTRA' // NOUVEAU
+            },
+            'es': {
+                'title_connect': '// Astro-Sobrevive // Conectar',
+                'title_shop': 'Tienda // Arsenal',
+                'title_settings': '// AJUSTES',
+                'placeholder_name': '[INTRODUCE NOMBRE DE PILOTO]',
+                'type_pc': 'TIPO: PC (Teclado)',
+                'type_mobile': 'TIPO: MÓVIL (Táctil)',
+                'play_solo': 'Jugar Solo',
+                'shop': 'Tienda',
+                'online': 'Jugadores en Línea',
+                'settings': 'Ajustes',
+                'loading': 'Cargando Sesión...',
+                'loading_simple': 'CARGANDO...',
+                'leaderboard_player': 'Piloto',
+                'leaderboard_score': 'Puntaje',
+                'leaderboard_loading': 'ESCANEANDO RED...',
+                'shop_skin_blue': 'Skin Viper',
+                'shop_skin_red': 'Skin Baron',
+                'shop_turret': 'Auto-Torreta',
+                'shop_permanent': '// MEJORAS PERMANENTES',
+                'shop_cost': 'Costo',
+                'shop_owned': 'Obtenido',
+                'shop_equipped': 'Equipado',
+                'back': 'Volver',
+                'language': 'Idioma',
+                'volume': 'VOLUMEN DE AUDIO',
+                'particles': 'Partículas',
+                'music': 'Música',
+                'particles_on': 'Partículas: SÍ',
+                'particles_off': 'Partículas: NO',
+                'music_on': 'Música: SÍ',
+                'music_off': 'Música: NO',
+                'ui_points': '// PUNTOS',
+                'ui_kills': '// BAJAS',
+                'ui_shield': 'Escudo',
+                'upgrade_fireRate': 'Cadencia',
+                'upgrade_shipSpeed': 'Vel. Nave',
+                'upgrade_bulletSpeed': 'Vel. Bala',
+                'upgrade_maxHealth': 'Vida Máx',
+                'upgrade_shipSize': 'Tamaño Nave',
+                'upgrade_bulletDamage': 'Daño Bala',
+                'upgrade_healthRegen': 'Regeneración',
+                'back_menu': 'Menú Principal',
+                'game_over': 'CONEXIÓN PERDIDA',
+                'game_over_score': 'Has añadido {score} puntos a tu total.',
+                'leaderboard_ingame': '// TOP 3 PILOTOS',
+                'alert_invasion': '// INVASIÓN // OBJETIVO: {kills} BAJAS',
+                'alert_invasion_remaining': '// INVASIÓN // {kills} RESTANTES',
+                'alert_mega_brute': '// ALERTA: MEGA-BRUTO DETECTADO //',
+                'alert_ultra_boss': '// ALERTA: TITÁN ULTRA DETECTADO //',
+                'alert_boss': '!! JEFE DETECTADO !!', // NOUVEAU
+                'alert_invasion_small': '// INVASIÓN // OBJETIVO: {kills} BAJAS',
+                'success_invasion': '// INVASIÓN REPELIDA //',
+                'success_wave': '// OLEADA REPELIDA //',
+                'success_boss': '// JEFE DERROTADO //',
+                'success_ultra_boss': '// TITÁN ULTRA DERROTADO //',
+                'success_mega_brute': '// MEGA-BRUTO ELIMINADO //',
+                'level_boss': 'N.JEFE', // NOUVEAU
+                'level_ultra': 'N.ULTRA' // NOUVEAU
+            },
+            'ja': {
+                'title_connect': '// アストロサバイブ // 接続',
+                'title_shop': 'ショップ // アーセナル',
+                'title_settings': '// 設定',
+                'placeholder_name': '[パイロット名を入力]',
+                'type_pc': 'タイプ: PC (キーボード)',
+                'type_mobile': 'タイプ: モバイル (タッチ)',
+                'play_solo': 'ソロプレイ',
+                'shop': 'ショップ',
+                'online': 'オンラインプレイヤー',
+                'settings': '設定',
+                'loading': 'セッションを読み込み中...',
+                'loading_simple': '読み込み中...',
+                'leaderboard_player': 'パイロット',
+                'leaderboard_score': 'スコア',
+                'leaderboard_loading': 'ネットワークをスキャン中...',
+                'shop_skin_blue': 'スキン「バイパー」',
+                'shop_skin_red': 'スキン「バロン」',
+                'shop_turret': 'オートタレット',
+                'shop_permanent': '// 永続アップグレード',
+                'shop_cost': 'コスト',
+                'shop_owned': '所有済み',
+                'shop_equipped': '装備中',
+                'back': '戻る',
+                'language': '言語',
+                'volume': 'オーディオ音量',
+                'particles': 'パーティクル',
+                'music': '音楽',
+                'particles_on': 'パーティクル: オン',
+                'particles_off': 'パーティクル: オフ',
+                'music_on': '音楽: オン',
+                'music_off': '音楽: オフ',
+                'ui_points': '// ポイント',
+                'ui_kills': '// キル',
+                'ui_shield': 'シールド',
+                'upgrade_fireRate': '連射速度',
+                'upgrade_shipSpeed': '船の速度',
+                'upgrade_bulletSpeed': '弾速',
+                'upgrade_maxHealth': '最大体力',
+                'upgrade_shipSize': '船のサイズ',
+                'upgrade_bulletDamage': '弾のダメージ',
+                'upgrade_healthRegen': '体力再生',
+                'back_menu': 'メインメニュー',
+                'game_over': '接続が切れました',
+                'game_over_score': '合計に {score} ポイントを追加しました。',
+                'leaderboard_ingame': '// トップ3パイロット',
+                'alert_invasion': '// 侵略 // 目標: {kills} キル',
+                'alert_invasion_remaining': '// 侵略 // 残り {kills} キル',
+                'alert_mega_brute': '// 警告: メガ・ブルート検出 //',
+                'alert_ultra_boss': '// 警告: ウルトラ・タイタン検出 //',
+                'alert_boss': '!! ボス検出 !!', // NOUVEAU
+                'alert_invasion_small': '// 侵略 // 目標: {kills} キル',
+                'success_invasion': '// 侵略を撃退 //',
+                'success_wave': '// ウェーブ撃退 //',
+                'success_boss': '// ボス撃破 //',
+                'success_ultra_boss': '// ウルトラ・タイタン撃破 //',
+                'success_mega_brute': '// メガ・ブルート撃破 //',
+                'level_boss': 'L.BOSS', // NOUVEAU
+                'level_ultra': 'L.ULTRA' // NOUVEAU
+            },
+            'zh': {
+                'title_connect': '// 太空生存 // 连接',
+                'title_shop': '商店 // 军火库',
+                'title_settings': '// 设置',
+                'placeholder_name': '[输入飞行员名称]',
+                'type_pc': '类型: 电脑 (键盘)',
+                'type_mobile': '类型: 手机 (触摸)',
+                'play_solo': '单人游戏',
+                'shop': '商店',
+                'online': '在线玩家',
+                'settings': '设置',
+                'loading': '正在加载会话...',
+                'loading_simple': '加载中...',
+                'leaderboard_player': '飞行员',
+                'leaderboard_score': '分数',
+                'leaderboard_loading': '正在扫描网络...',
+                'shop_skin_blue': '皮肤“蝰蛇”',
+                'shop_skin_red': '皮肤“男爵”',
+                'shop_turret': '自动炮塔',
+                'shop_permanent': '// 永久升级',
+                'shop_cost': '花费',
+                'shop_owned': '已拥有',
+                'shop_equipped': '已装备',
+                'back': '返回',
+                'language': '语言',
+                'volume': '音量',
+                'particles': '粒子效果',
+                'music': '音乐',
+                'particles_on': '粒子效果: 开',
+                'particles_off': '粒子效果: 关',
+                'music_on': '音乐: 开',
+                'music_off': '音乐: 关',
+                'ui_points': '// 分数',
+                'ui_kills': '// 击杀',
+                'ui_shield': '护盾',
+                'upgrade_fireRate': '射速',
+                'upgrade_shipSpeed': '飞船速度',
+                'upgrade_bulletSpeed': '子弹速度',
+                'upgrade_maxHealth': '最大生命值',
+                'upgrade_shipSize': '飞船大小',
+                'upgrade_bulletDamage': '子弹伤害',
+                'upgrade_healthRegen': '生命恢复',
+                'back_menu': '主菜单',
+                'game_over': '连接丢失',
+                'game_over_score': '您总共获得了 {score} 分。',
+                'leaderboard_ingame': '// TOP 3 飞行员',
+                'alert_invasion': '// 入侵 // 目标: {kills} 击杀',
+                'alert_invasion_remaining': '// 入侵 // 剩余 {kills} 击杀',
+                'alert_mega_brute': '// 警报: 检测到巨型野兽 //',
+                'alert_ultra_boss': '// 警报: 检测到究极泰坦 //',
+                'alert_boss': '!! BOSS 已检测 !!', // NOUVEAU
+                'alert_invasion_small': '// 入侵 // 目标: {kills} 击杀',
+                'success_invasion': '// 入侵已击退 //',
+                'success_wave': '// 波次已击退 //',
+                'success_boss': '// BOSS 已击败 //',
+                'success_ultra_boss': '// 究极泰坦已击败 //',
+                'success_mega_brute': '// 巨型野兽已消灭 //',
+                'level_boss': '级.BOSS', // NOUVEAU
+                'level_ultra': '级.ULTRA' // NOUVEAU
+            }
+        };
+
+        // --- FIN Traduction ---
+        
+        // --- NOUVEAU: Initialisation des Sons (Musique Tone.js) ---
+        function initAudio() {
+            // Évite le crash si Tone.js n'est pas chargé
+            if (typeof Tone === 'undefined') return;
+
+            // NOUVEAU: Créer le volume principal
+            mainVolume = new Tone.Volume(gameSettings.volume).toDestination();
+
+            // Son de tir (Plus "Blaster")
+            shootSound = new Tone.MembraneSynth({
+                pitchDecay: 0.01,
+                octaves: 6,
+                oscillator: { type: 'square' },
+                envelope: { attack: 0.001, decay: 0.2, sustain: 0.01, release: 0.1 },
+                volume: -15
+            }).connect(mainVolume); // Connecter au volume principal
+            
+            // CORRECTION: Son de tir Alien dédié
+            alienShootSound = new Tone.MembraneSynth({
+                pitchDecay: 0.02,
+                octaves: 4,
+                oscillator: { type: 'triangle' },
+                envelope: { attack: 0.001, decay: 0.1, sustain: 0.01, release: 0.1 },
+                volume: -20 // Plus silencieux
+            }).connect(mainVolume);
+            
+            // NOUVEAU: Son de bouton
+            buttonSound = new Tone.Synth({
+                oscillator: { type: 'triangle' },
+                envelope: { attack: 0.001, decay: 0.1, sustain: 0.01, release: 0.1 },
+                volume: -10
+            }).connect(mainVolume);
+
+            // Son d'explosion (Plus "Boom")
+            explosionSound = new Tone.NoiseSynth({
+                noise: { type: 'pink' },
+                envelope: { attack: 0.01, decay: 0.3, sustain: 0, release: 0.2 },
+                volume: -5
+            }); // Ne pas connecter à la destination
+            const explosionFilter = new Tone.AutoFilter("8n").connect(mainVolume).start(); // Connecter le filtre au volume
+            explosionSound.connect(explosionFilter);
+            
+            // Son de dégât (Alerte)
+            hitSound = new Tone.FMSynth({
+                harmonicity: 3,
+                modulationIndex: 10,
+                oscillator: { type: 'sine' },
+                envelope: { attack: 0.01, decay: 0.2, sustain: 0, release: 0.1 },
+                volume: -5
+            }).connect(mainVolume); // Connecter au volume principal
+            
+            // NOUVELLE Musique (Ambiante, non répétitive)
+            const reverb = new Tone.Reverb(4).connect(mainVolume); // Connecter la réverbération au volume
+            const synth = new Tone.FMSynth({
+                harmonicity: 1.5,
+                modulationIndex: 10,
+                oscillator: { type: 'sine' },
+                envelope: { attack: 0.1, decay: 0.3, sustain: 0.5, release: 0.8 },
+                volume: -20
+            }).connect(reverb);
+            
+            const bassSynth = new Tone.MonoSynth({
+                oscillator: { type: 'fmsquare' },
+                envelope: { attack: 0.05, decay: 0.1, sustain: 0.8, release: 0.5 },
+                volume: -15
+            }).connect(reverb);
+            
+            // Séquence plus longue et plus ambiante
+            const melody = new Tone.Pattern((time, note) => {
+                synth.triggerAttackRelease(note, "1m", time); // Note plus longue
+            }, ["C3", null, "Eb3", "G3", null, "Bb3", "C4", null, "G3", "F3", null, "Eb3", "C3", null, null, null], "1m"); // Se joue sur une mesure complète
+            melody.humanize = true;
+
+            const bass = new Tone.Loop((time) => {
+                bassSynth.triggerAttackRelease("C2", "2m", time); // Note de basse très longue (2 mesures)
+            }, "2m");
+
+            music = [synth, bassSynth, melody, bass];
+            
+            Tone.Transport.bpm.value = 80; // Tempo plus lent
+            audioReady = true;
+        }
+
+        // --- Fonctions de gestion d'UI et d'état ---
+
+        function getUIElements() {
+            scoreElement = document.getElementById('score');
+            killCountElement = document.getElementById('kill-count'); // NOUVEAU
+            healthBarElement = document.getElementById('health-bar');
+            shieldTimerElement = document.getElementById('shield-timer');
+            // Panneau d'upgrade en jeu RESTAURÉ
+            upgradeFireRateBtn = document.getElementById('upgrade-fire-rate');
+            upgradeShipSpeedBtn = document.getElementById('upgrade-ship-speed');
+            upgradeBulletSpeedBtn = document.getElementById('upgrade-bullet-speed');
+            upgradeMaxHealthBtn = document.getElementById('upgrade-max-health');
+            backToMenuButton = document.getElementById('back-to-menu-button'); // NOUVEAU
+            
+            menuScreen = document.getElementById('menu-screen');
+            shopScreen = document.getElementById('shop-screen');
+            gameOverElement = document.getElementById('game-over-screen');
+            playButton = document.getElementById('play-button');
+            shopButton = document.getElementById('shop-button');
+            shopBackButton = document.getElementById('shop-back-button');
+            restartButton = document.getElementById('restart-button');
+            googleSignInButton = document.getElementById('google-signin-button'); // NOUVEAU
+            
+            // NOUVEAU: Éléments des paramètres
+            settingsScreen = document.getElementById('settings-screen');
+            volumeSlider = document.getElementById('volume-slider');
+            toggleParticlesButton = document.getElementById('toggle-particles-button');
+            settingsButton = document.getElementById('settings-button');
+            settingsBackButton = document.getElementById('settings-back-button');
+            toggleMusicButton = document.getElementById('toggle-music-button'); // NOUVEAU
+            languageSelect = document.getElementById('language-select'); // NOUVEAU
+            
+            shopPointsDisplay = document.getElementById('shop-points-display');
+            buySkinBlueBtn = document.getElementById('buy-skin-blue');
+            buySkinRedBtn = document.getElementById('buy-skin-red');
+            buyAutoTurretBtn = document.getElementById('buy-auto-turret');
+            
+            // NOUVEAU: Boutons d'upgrade dans la boutique
+            buyShipSpeedBtn_shop = document.getElementById('buy-ship-speed');
+            buyBulletSpeedBtn_shop = document.getElementById('buy-bullet-speed');
+            buyFireRateBtn_shop = document.getElementById('buy-fire-rate');
+            buyMaxHealthBtn_shop = document.getElementById('buy-max-health');
+            buyShipSizeBtn = document.getElementById('buy-ship-size');
+            buyBulletDamageBtn = document.getElementById('buy-bullet-damage');
+            buyHealthRegenBtn = document.getElementById('buy-health-regen');
+            
+            finalScoreDisplay = document.getElementById('final-score-display');
+            playerNameInput = document.getElementById('player-name-input'); 
+            multiplayerButton = document.getElementById('multiplayer-button'); 
+            // Mini-map supprimée
+            leaderboardBody = document.getElementById('leaderboard-body');
+            ingameLeaderboardBody = document.getElementById('ingame-leaderboard-body'); 
+            
+            eventAlertElement = document.getElementById('event-alert'); // NOUVEAU
+            eventSuccessElement = document.getElementById('event-success'); // NOUVEAU
+            
+            // NOUVEAU: Barre de vie du Boss
+            bossHealthBarElement = document.getElementById('boss-health-container');
+            bossHealthBarFillElement = document.getElementById('boss-health-bar-fill');
+
+            // NOUVEAU: Joysticks
+            moveArea = document.getElementById('movement-joystick-area');
+            moveBase = document.getElementById('movement-joystick-base');
+            moveStick = document.getElementById('movement-joystick-stick');
+            actionArea = document.getElementById('action-joystick-area');
+            actionBase = document.getElementById('action-joystick-base');
+            actionStick = document.getElementById('action-joystick-stick');
+        }
+
+        function updateAllUI() {
+            // CORRECTION: Ajout de vérifications (null checks) pour tous les éléments de l'UI
+            if (!player) return; 
+            const pScore = player.score;
+            const pUpgrades = player.upgrades;
+            const pCosts = player.upgradeCosts;
+            const sCosts = player.shopCosts;
+            const skins = player.skinsOwned;
+            const lang = translations[currentLang]; // NOUVEAU
+            
+            if (scoreElement) scoreElement.innerText = `${lang.ui_points}: ${pScore}`;
+            if (killCountElement) killCountElement.innerText = `${lang.ui_kills}: ${player.killCount || 0}`; 
+            if (healthBarElement) healthBarElement.style.width = (player.health / pUpgrades.health) * 100 + '%';
+            
+            // Affichage de la vie du boss (utilise maintenant le premier de la liste)
+            const currentBoss = bosses[0]; // NOUVEAU
+            if (currentBoss) {
+                const bossHealth = Math.max(0, currentBoss.health);
+                if (bossHealthBarElement) bossHealthBarElement.style.display = 'block';
+                if (bossHealthBarFillElement) bossHealthBarFillElement.style.width = (bossHealth / currentBoss.maxHealth) * 100 + '%';
+            } else {
+                if (bossHealthBarElement) bossHealthBarElement.style.display = 'none';
+            }
+
+            if (shieldTimerElement) {
+                if (player.shieldActive) {
+                    shieldTimerElement.style.display = 'block';
+                    shieldTimerElement.innerText = `${lang.ui_shield}: ${(player.shieldTimer / 1000).toFixed(1)}s`;
+                } else {
+                    shieldTimerElement.style.display = 'none';
+                }
+            }
+            
+            // NOUVEAU: Mettre à jour les boutons d'upgrade en JEU
+            if (upgradeFireRateBtn) {
+                upgradeFireRateBtn.innerText = `${lang.upgrade_fireRate} (${lang.shop_cost}: ${pCosts.fireRate})`;
+                upgradeFireRateBtn.disabled = pScore < pCosts.fireRate;
+            }
+            if (upgradeShipSpeedBtn) {
+                upgradeShipSpeedBtn.innerText = `${lang.upgrade_shipSpeed} (${lang.shop_cost}: ${pCosts.shipSpeed.toFixed(1)})`;
+                upgradeShipSpeedBtn.disabled = pScore < pCosts.shipSpeed;
+            }
+            if (upgradeBulletSpeedBtn) {
+                upgradeBulletSpeedBtn.innerText = `${lang.upgrade_bulletSpeed} (${lang.shop_cost}: ${pCosts.bulletSpeed.toFixed(0)})`;
+                upgradeBulletSpeedBtn.disabled = pScore < pCosts.bulletSpeed;
+            }
+            if (upgradeMaxHealthBtn) {
+                upgradeMaxHealthBtn.innerText = `${lang.upgrade_maxHealth} (${lang.shop_cost}: ${pCosts.maxHealth})`;
+                upgradeMaxHealthBtn.disabled = pScore < pCosts.maxHealth;
+            }
+
+            // NOUVEAU: Mettre à jour les boutons d'upgrade dans la boutique
+            if (shopPointsDisplay) shopPointsDisplay.innerText = `${lang.ui_points}: ${pScore}`;
+            
+            if (buyFireRateBtn_shop) {
+                const textEl = buyFireRateBtn_shop.querySelector('.shop-button-text');
+                if (textEl) textEl.innerText = `${lang.upgrade_fireRate} (${lang.shop_cost}: ${pCosts.fireRate})`;
+                buyFireRateBtn_shop.classList.toggle('disabled', pScore < pCosts.fireRate);
+            }
+            if (buyShipSpeedBtn_shop) {
+                const textEl = buyShipSpeedBtn_shop.querySelector('.shop-button-text');
+                if (textEl) textEl.innerText = `${lang.upgrade_shipSpeed} (${lang.shop_cost}: ${pCosts.shipSpeed.toFixed(1)})`;
+                buyShipSpeedBtn_shop.classList.toggle('disabled', pScore < pCosts.shipSpeed);
+            }
+            if (buyBulletSpeedBtn_shop) {
+                const textEl = buyBulletSpeedBtn_shop.querySelector('.shop-button-text');
+                if (textEl) textEl.innerText = `${lang.upgrade_bulletSpeed} (${lang.shop_cost}: ${pCosts.bulletSpeed.toFixed(0)})`;
+                buyBulletSpeedBtn_shop.classList.toggle('disabled', pScore < pCosts.bulletSpeed);
+            }
+            if (buyMaxHealthBtn_shop) {
+                const textEl = buyMaxHealthBtn_shop.querySelector('.shop-button-text');
+                if (textEl) textEl.innerText = `${lang.upgrade_maxHealth} (${lang.shop_cost}: ${pCosts.maxHealth})`;
+                buyMaxHealthBtn_shop.classList.toggle('disabled', pScore < pCosts.maxHealth);
+            }
+            if (buyShipSizeBtn) {
+                const textEl = buyShipSizeBtn.querySelector('.shop-button-text');
+                if (textEl) textEl.innerText = `${lang.upgrade_shipSize} (${lang.shop_cost}: ${pCosts.radius})`;
+                buyShipSizeBtn.classList.toggle('disabled', pScore < pCosts.radius);
+            }
+            if (buyBulletDamageBtn) {
+                const textEl = buyBulletDamageBtn.querySelector('.shop-button-text');
+                if (textEl) textEl.innerText = `${lang.upgrade_bulletDamage} (${lang.shop_cost}: ${pCosts.bulletDamage})`;
+                buyBulletDamageBtn.classList.toggle('disabled', pScore < pCosts.bulletDamage);
+            }
+            if (buyHealthRegenBtn) {
+                const textEl = buyHealthRegenBtn.querySelector('.shop-button-text');
+                if (textEl) textEl.innerText = `${lang.upgrade_healthRegen} (${lang.shop_cost}: ${pCosts.healthRegen})`;
+                buyHealthRegenBtn.classList.toggle('disabled', pScore < pCosts.healthRegen);
+            }
+
+
+            // Mise à jour de l'état des boutons de la boutique (visuel)
+            if (buySkinBlueBtn) {
+                const textEl = buySkinBlueBtn.querySelector('.shop-button-text');
+                if (textEl) textEl.innerText = skins.blue ? `${lang.shop_skin_blue} (${lang.shop_owned})` : `${lang.shop_skin_blue} (${lang.shop_cost}: ${sCosts.skinBlue})`;
+                buySkinBlueBtn.classList.toggle('disabled', (skins.blue) || (!skins.blue && pScore < sCosts.skinBlue));
+            }
+            if (buySkinRedBtn) {
+                const textEl = buySkinRedBtn.querySelector('.shop-button-text');
+                if (textEl) textEl.innerText = skins.red ? `${lang.shop_skin_red} (${lang.shop_owned})` : `${lang.shop_skin_red} (${lang.shop_cost}: ${sCosts.skinRed})`;
+                buySkinRedBtn.classList.toggle('disabled', (skins.red) || (!skins.red && pScore < sCosts.skinRed));
+            }
+            if (buyAutoTurretBtn) {
+                const textEl = buyAutoTurretBtn.querySelector('.shop-button-text');
+                if (textEl) textEl.innerText = player.hasAutoTurret ? `${lang.shop_turret} (${lang.shop_owned})` : `${lang.shop_turret} (${lang.shop_cost}: ${sCosts.autoTurret})`;
+                buyAutoTurretBtn.classList.toggle('disabled', player.hasAutoTurret || pScore < sCosts.autoTurret);
+            }
+            
+            // Gérer le cas où le skin est équipé
+            if (skins.blue && player.skin === 'blue' && buySkinBlueBtn) {
+                const textEl = buySkinBlueBtn.querySelector('.shop-button-text');
+                if (textEl) textEl.innerText = `${lang.shop_skin_blue} (${lang.shop_equipped})`;
+            }
+            if (skins.red && player.skin === 'red' && buySkinRedBtn) {
+                const textEl = buySkinRedBtn.querySelector('.shop-button-text');
+                if (textEl) textEl.innerText = `${lang.shop_skin_red} (${lang.shop_equipped})`;
+            }
+
+
+            // NOUVEAU: Mettre à jour l'UI des Paramètres
+            if (volumeSlider) { 
+                volumeSlider.value = gameSettings.volume;
+            }
+            if (toggleParticlesButton) {
+                toggleParticlesButton.innerText = gameSettings.particlesEnabled ? lang.particles_on : lang.particles_off;
+            }
+            
+            if (toggleMusicButton) {
+                toggleMusicButton.innerText = gameSettings.musicEnabled ? lang.music_on : lang.music_off;
+            }
+
+            if (multiplayerButton) {
+                multiplayerButton.innerText = `${lang.online} (${otherPlayers.length + 1})`;
+                if (gameState === 'MENU') {
+                    if (otherPlayers.length > 0) {
+                         multiplayerButton.innerText = `${lang.online} (${lang.shop_cost}: ${otherPlayers.length + 1})`; // Simple réutilisation, 'Join' serait mieux
+                    } else {
+                         multiplayerButton.innerText = `${lang.online} (Solo)`;
+                    }
+                }
+            }
+            updateLeaderboardUI();
+        }
+        
+        // Met à jour le tableau de score
+        function updateLeaderboardUI() {
+            let html = '';
+            let ingameHtml = '';
+            const lang = translations[currentLang];
+
+            if (leaderboardData.length === 0) {
+                html = `<tr><td colspan="3">${lang.leaderboard_loading}</td></tr>`;
+                ingameHtml = `<li>${lang.loading_simple}</li>`;
+            } else {
+                leaderboardData.forEach((data, index) => {
+                    const crown = index === 0 ? '<span class="crown">👑</span>' : '';
+                    const color = data.id === userId ? '#ffffff' : 'white'; // NOUVEAU: Accent blanc
+                    const name = data.playerName;
+                    const score = data.score;
+
+                    // Version pour le menu (tableau)
+                    html += `
+                        <tr>
+                            <td>${index + 1}</td>
+                            <td style="color:${color};">${crown}${name}</td>
+                            <td>${score}</td>
+                        </tr>
+                    `;
+                    
+                    // NOUVEAU: Version pour le jeu (liste, top 3)
+                    if (index < 3) {
+                         ingameHtml += `<li style="color:${color};">${crown}${name}: ${score}</li>`;
+                    }
+                });
+            }
+            
+            // CORRECTION: Ajouter des vérifications (null checks)
+            if (leaderboardBody) leaderboardBody.innerHTML = html;
+            if (ingameLeaderboardBody) ingameLeaderboardBody.innerHTML = ingameHtml;
+        }
+
+
+        // --- NOUVEAU: Boucle d'animation pour le menu ---
+        function menuLoop() {
+            // S'arrête si on entre en jeu
+            if (gameState === 'GAME') return; 
+            
+            requestAnimationFrame(menuLoop);
+            
+            if (!ctx) return; 
+            
+            // Créer les étoiles si elles n'existent pas
+            if (stars.length === 0 && canvas.width > 0) createStars();
+            
+            // Mettre à jour les étoiles (sans thrust)
+            controlState.thrust = false; 
+            updateStars(); 
+            
+            // Dessiner
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            drawStars();
+        }
+        
+        // NOUVEAU: Helper pour détecter le mobile
+        function isMobile() {
+            return ('ontouchstart' in window);
+        }
+
+        function setGameState(newState) {
+            gameState = newState;
+            
+            // --- NOUVEAU: Gérer l'animation du fond et la boucle de jeu ---
+            if (newState === 'MENU' || newState === 'SHOP' || newState === 'SETTINGS' || newState === 'GAMEOVER') {
+                document.body.classList.add('menu-active');
+                gameIsOver = true; // Arrêter la boucle de jeu
+                canvas.style.display = 'block'; // Afficher le canvas pour les étoiles
+            } else {
+                document.body.classList.remove('menu-active');
+                gameIsOver = false; // Démarrer la boucle de jeu
+            }
+            // --- FIN NOUVEAU ---
+
+            // Cacher tous les écrans
+            document.querySelectorAll('.game-ui').forEach(el => el.style.display = 'none'); 
+            document.getElementById('menu-screen').style.display = 'none';
+            document.getElementById('shop-screen').style.display = 'none';
+            document.getElementById('game-over-screen').style.display = 'none';
+            document.getElementById('settings-screen').style.display = 'none';
+            
+            // Cacher les Joysticks
+            if (isMobile()) {
+                moveArea.style.display = 'none';
+                actionArea.style.display = 'none';
+            }
+            
+            if (newState === 'MENU') {
+                document.getElementById('menu-screen').style.display = 'block';
+                if (player) playerNameInput.value = player.playerName; 
+                startLeaderboardListener(); 
+                if (stars.length === 0) createStars(); 
+                
+                // Démarrer la musique de menu si activée
+                if(audioReady && gameSettings.musicEnabled && Tone.Transport.state !== "started") {
+                    Tone.Transport.start();
+                    music.forEach(m => m.start ? m.start(0) : null);
+                }
+                menuLoop(); // Démarrer l'animation de menu
+                
+                // Gérer l'état des boutons de connexion
+                if (auth && auth.currentUser) { 
+                    if(googleSignInButton) googleSignInButton.style.display = 'none'; 
+                    if (playButton) playButton.disabled = false;
+                    if (shopButton) shopButton.disabled = false;
+                    if (multiplayerButton) multiplayerButton.disabled = false;
+                } else {
+                    if(googleSignInButton) googleSignInButton.style.display = 'block';
+                    if (playButton) playButton.disabled = true;
+                    if (shopButton) shopButton.disabled = true;
+                    if (multiplayerButton) multiplayerButton.disabled = true;
+                }
+
+            } else if (newState === 'SHOP') {
+                document.getElementById('shop-screen').style.display = 'block';
+                menuLoop(); // Continuer l'animation de menu
+            } else if (newState === 'SETTINGS') { 
+                document.getElementById('settings-screen').style.display = 'block';
+                menuLoop(); // Continuer l'animation de menu
+            } else if (newState === 'GAME') {
+                
+                // NOUVEAU: Démarrer le contexte audio et la musique
+                if (typeof Tone !== 'undefined' && Tone.context.state !== 'running') {
+                    Tone.context.resume();
+                }
+                if (!audioReady) {
+                    initAudio();
+                }
+                
+                // NOUVEAU: Démarrer la musique Tone.js (seulement si activée)
+                if(audioReady && gameSettings.musicEnabled) {
+                    Tone.Transport.start();
+                    music.forEach(m => m.start ? m.start(0) : null);
+                }
+
+                document.getElementById('game-over-screen').style.display = 'none';
+                canvas.style.display = 'block';
+                document.querySelectorAll('.game-ui').forEach(el => el.style.display = 'block'); 
+                
+                // NOUVEAU: Afficher les Joysticks
+                if (isMobile()) {
+                    moveArea.style.display = 'block';
+                    actionArea.style.display = 'block';
+                }
+                
+                startLeaderboardListener(); 
+                startMultiplayerListener();
+                startWorldSyncListeners(); // NOUVEAU: Démarrer les listeners du monde
+                
+                gameIsOver = false; // Assurer que c'est faux
+                gameLoop(); // Démarrer la boucle de jeu
+                
+            } else if (newState === 'GAMEOVER') {
+                document.getElementById('game-over-screen').style.display = 'block';
+                stopMultiplayerListener();
+                stopWorldSyncListeners(); // NOUVEAU: Arrêter les listeners du monde
+                stopLeaderboardListener(); 
+                
+                // NOUVEAU: Arrêter la musique
+                if (audioReady) {
+                    Tone.Transport.stop();
+                    music.forEach(m => m.stop ? m.stop() : null);
+                }
+                
+                // Démarrer la musique de menu si activée
+                if(audioReady && gameSettings.musicEnabled) {
+                    Tone.Transport.start();
+                    music.forEach(m => m.start ? m.start(0) : null);
+                }
+                menuLoop(); // Démarrer l'animation de menu
+            }
+            updateAllUI(); 
+        }
+
+        function buyUpgrade(type) {
+            if (!player || gameState === 'GAMEOVER' || gameState === 'LOADING') return; 
+            
+            const cost = player.upgradeCosts[type];
+            if (player.score >= cost) {
+                player.score -= cost; // CORRECTION: Supprimé la ligne 'score -= cost' en double
+                player.upgrades.level++; 
+                if (type === 'fireRate') {
+                    player.upgrades.fireRate *= 0.85; 
+                    player.upgradeCosts.fireRate = Math.floor(cost * 1.5);
+                } else if (type === 'shipSpeed') {
+                    player.upgrades.speed += 1.0 * GAME_SPEED; // CORRECTION: Amélioration (1.0)
+                    player.upgradeCosts.shipSpeed = Math.floor(cost * 1.7);
+                } else if (type === 'bulletSpeed') {
+                    player.upgrades.bulletSpeed += 2 * GAME_SPEED; // CORRECTION: Amélioration (2.0)
+                    player.upgradeCosts.bulletSpeed = Math.floor(cost * 1.5);
+                } else if (type === 'maxHealth') {
+                    player.upgrades.health += 40; 
+                    player.health = player.upgrades.health; 
+                    player.upgradeCosts.maxHealth = Math.floor(cost * 1.8);
+                } else if (type === 'radius') {
+                    player.upgrades.radius += 3; // Augmente la taille
+                    player.radius = player.upgrades.radius; // Appliquer immédiatement
+                    player.upgradeCosts.radius = Math.floor(cost * 2.0);
+                } else if (type === 'bulletDamage') {
+                    player.upgrades.bulletDamage += 10;
+                    player.upgradeCosts.bulletDamage = Math.floor(cost * 1.8);
+                } else if (type === 'healthRegen') {
+                    player.upgrades.healthRegen += 0.05; // 0.05 HP par frame
+                    player.upgradeCosts.healthRegen = Math.floor(cost * 2.5);
+                }
+                updateAllUI();
+                saveGame(true); 
+            }
+        }
+        
+        function buyFromShop(item) {
+            if (!player || gameState === 'GAMEOVER' || gameState === 'LOADING') return; 
+            if (item === 'skinBlue') {
+                if (player.skinsOwned.blue) { player.skin = 'blue'; } 
+                else if (player.score >= player.shopCosts.skinBlue) {
+                    player.score -= player.shopCosts.skinBlue; player.skinsOwned.blue = true; player.skin = 'blue';
+                }
+            } else if (item === 'skinRed') {
+                if (player.skinsOwned.red) { player.skin = 'red'; }
+                else if (player.score >= player.shopCosts.skinRed) {
+                    player.score -= player.shopCosts.skinRed; player.skinsOwned.red = true; player.skin = 'red';
+                }
+            } else if (item === 'autoTurret') {
+                if (!player.hasAutoTurret && player.score >= player.shopCosts.autoTurret) {
+                    player.score -= player.shopCosts.autoTurret; player.hasAutoTurret = true;
+                }
+            }
+            updateAllUI();
+            saveGame(true);
+        }
+
+
+        // --- Logique Multijoueur et Synchro ---
+        
+        // CORRECTION: Suppression de la re-déclaration de dbGameDataRoot
+        // const dbGameDataRoot = ...
+
+        async function updatePlayerPosition() {
+            if (gameState !== 'GAME' || !player || !userId) return;
+            
+            const playerDocRef = doc(db, `${dbGameDataRoot}/sessions`, sessionId); // CORRECTION
+            const data = {
+                userId: userId, 
+                x: player.x,
+                y: player.y,
+                angle: player.angle,
+                score: player.score,
+                skin: player.skin,
+                playerName: player.playerName || 'Pilote',
+                hasAutoTurret: player.hasAutoTurret, 
+                radius: player.upgrades.radius, 
+                lastUpdate: Date.now(), // CORRECTION: Ajout de l'horodatage
+                isShooting: controlState.shoot, 
+                lastShot: player.lastShot 
+            };
+            try {
+                await setDoc(playerDocRef, data);
+            } catch (error) {}
+        }
+        
+        function startMultiplayerListener() {
+            if (!db || !userId || typeof window.onSnapshot === 'undefined' || !dbGameDataRoot) return;
+            if (unsubscribePlayers) unsubscribePlayers();
+
+            const sessionsColRef = collection(db, `${dbGameDataRoot}/sessions`); // CORRECTION
+            const q = query(sessionsColRef); 
+            
+            unsubscribePlayers = onSnapshot(q, (snapshot) => {
+                const newOtherPlayers = [];
+                let allPlayers = []; 
+
+                snapshot.forEach(doc => {
+                    const data = doc.data();
+                    if (data.lastUpdate && Date.now() - data.lastUpdate < 30000) { 
+                        allPlayers.push({ ...data, id: doc.id });
+                    }
+                    
+                    if (doc.id !== sessionId && data.lastUpdate && Date.now() - data.lastUpdate < 30000) { 
+                        
+                        const oldPlayerData = otherPlayers.find(p => p.id === doc.id);
+                        
+                        if (oldPlayerData && data.isShooting && data.lastShot > oldPlayerData.lastShot) {
+                            fireCosmeticBullet(data); 
+                        }
+                        
+                        newOtherPlayers.push({ ...data, id: doc.id });
+                    }
+                });
+                
+                allPlayers.push({ id: sessionId, lastUpdate: Date.now() });
+                
+                allPlayers.sort((a, b) => a.id.localeCompare(b.id));
+                const newHostId = allPlayers[0].id;
+                isHost = (newHostId === sessionId);
+                
+                if (isHost && asteroids.length === 0 && aliens.length === 0) {
+                    console.log("Je suis l'hôte, je crée le monde.");
+                    createAsteroids();
+                }
+
+                otherPlayers = newOtherPlayers; 
+                updateAllUI(); 
+            }, (error) => {
+                console.error("Erreur de synchronisation multijoueur:", error);
+            });
+        }
+        
+        function stopMultiplayerListener() {
+            if (unsubscribePlayers) {
+                unsubscribePlayers();
+                unsubscribePlayers = null;
+                deletePlayerPosition();
+                otherPlayers = [];
+                isHost = false; 
+            }
+        }
+        
+        async function deletePlayerPosition() {
+             if (!db || !userId || typeof window.doc === 'undefined' || typeof window.setDoc === 'undefined') return;
+             const playerDocRef = doc(db, `${dbGameDataRoot}/sessions`, sessionId); // CORRECTION
+             try {
+                 await setDoc(playerDocRef, { lastUpdate: 0 }, { merge: true });
+             } catch (error) {}
+        }
+        
+        // --- NOUVEAU: Synchro du Monde (Création et Destruction) ---
+        
+        function startWorldSyncListeners() {
+            if (!db || unsubscribeWorldObjects || unsubscribeRemovals) return;
+
+            // 1. Listener pour la CRÉATION d'objets
+            const worldCollection = collection(db, `${dbGameDataRoot}/world_objects`); // CORRECTION
+            unsubscribeWorldObjects = onSnapshot(worldCollection, (snapshot) => {
+                snapshot.docChanges().forEach((change) => {
+                    if (change.type === "added") {
+                        const obj = change.doc.data();
+                        obj.id = change.doc.id; 
+                        
+                        if (obj.type === 'asteroid' && !asteroids.find(a => a.id === obj.id)) {
+                            asteroids.push(obj);
+                        } else if (obj.type === 'alien' && !aliens.find(a => a.id === obj.id)) {
+                            aliens.push(obj);
+                        } else if (obj.type === 'brute' && !bruteAliens.find(a => a.id === obj.id)) {
+                            bruteAliens.push(obj);
+                        } else if (obj.type === 'powerup' && !powerUps.find(p => p.id === obj.id)) {
+                            powerUps.push(obj);
+                        } else if (obj.type === 'boss' && !bosses.find(b => b.id === obj.id)) { 
+                            bosses.push(obj);
+                            bossSpawned = true; 
+                        }
+                    }
+                });
+            });
+
+            // 2. Listener pour la DESTRUCTION d'objets
+            const removalCollection = collection(db, `${dbGameDataRoot}/object_removals`); // CORRECTION
+            unsubscribeRemovals = onSnapshot(removalCollection, (snapshot) => {
+                snapshot.docChanges().forEach((change) => {
+                    if (change.type === "added" || change.type === "modified") {
+                        const id = change.doc.id;
+                        asteroids = asteroids.filter(a => a.id !== id);
+                        aliens = aliens.filter(a => a.id !== id);
+                        bruteAliens = bruteAliens.filter(b => b.id !== id);
+                        powerUps = powerUps.filter(p => p.id !== id);
+                        bosses = bosses.filter(b => b.id !== id); 
+                        
+                        if (bosses.length === 0) {
+                            bossSpawned = false;
+                        }
+                    }
+                });
+            });
+            
+            // 3. Listener pour les ÉVÉNEMENTS GLOBAUX
+            const eventDoc = doc(db, `${dbGameDataRoot}/game_state`, "current_event"); // CORRECTION
+            unsubscribeCurrentEvent = onSnapshot(eventDoc, (doc) => {
+                if (doc.exists()) {
+                    const eventData = doc.data();
+                    if (currentEvent === null || (eventData.timestamp && (!currentEvent.timestamp || eventData.timestamp > currentEvent.timestamp))) {
+                        currentEvent = eventData;
+                        showEventAlert(eventData.title);
+                        if (eventData.type === "invasion") {
+                            invasionKillsNeeded = eventData.kills;
+                        }
+                    }
+                }
+            });
+        }
+
+        // Arrêter tous les listeners du monde
+        function stopWorldSyncListeners() {
+            if (unsubscribeWorldObjects) unsubscribeWorldObjects();
+            if (unsubscribeRemovals) unsubscribeRemovals();
+            if (unsubscribeCurrentEvent) unsubscribeCurrentEvent(); 
+            unsubscribeWorldObjects = null;
+            unsubscribeRemovals = null;
+            unsubscribeCurrentEvent = null; 
+        }
+
+        // Fonction pour que TOUT LE MONDE signale la destruction/prise
+        async function syncObjectRemoval(objectId) {
+            if (!db) return;
+            const docRef = doc(db, `${dbGameDataRoot}/object_removals`, objectId); // CORRECTION
+            try {
+                await setDoc(docRef, { removedBy: userId, timestamp: Date.now() });
+            } catch (error) { console.error("Erreur de synchro suppression:", error); }
+        }
+        
+        // NOUVEAU: Fonction pour que l'HÔTE signale un événement
+        async function syncEvent(eventData) {
+            if (!db || !isHost) return; // Seul l'hôte peut envoyer
+            const eventDoc = doc(db, `${dbGameDataRoot}/game_state`, "current_event"); // CORRECTION
+            try {
+                await setDoc(eventDoc, { ...eventData, timestamp: Date.now() });
+            } catch (error) { console.error("Erreur de synchro événement:", error); }
+        }
+        
+        // NOUVEAU: Leaderboard Listener
+        function startLeaderboardListener() {
+            if (!db || typeof window.onSnapshot === 'undefined' || !dbGameDataRoot) return; // CORRECTION: S'assurer que dbGameDataRoot est défini
+            if (unsubscribeLeaderboard) unsubscribeLeaderboard(); // CORRECTION: Le bug était ici
+            
+            const leaderboardColRef = collection(db, `${dbGameDataRoot}/leaderboard`); // CORRECTION
+            const q = query(leaderboardColRef, orderBy("score", "desc"), limit(5));
+
+            unsubscribeLeaderboard = onSnapshot(q, (snapshot) => {
+                leaderboardData = [];
+                snapshot.forEach(doc => {
+                    const data = doc.data();
+                    leaderboardData.push({
+                        playerName: data.playerName || 'Pilote Inconnu',
+                        score: data.score || 0,
+                        id: doc.id
+                    });
+                });
+                updateAllUI();
+            }, (error) => {
+                console.error("Erreur de synchronisation du classement:", error);
+            });
+        }
+        
+        function stopLeaderboardListener() {
+            if (unsubscribeLeaderboard) {
+                unsubscribeLeaderboard();
+                unsubscribeLeaderboard = null;
+            }
+        }
+
+
+        // --- Logique de Jeu ---
+        
+        function resetLevel(startX = canvas.width / 2, startY = canvas.height / 2) {
+            gameIsOver = false;
+            
+            player.x = startX;
+            player.y = startY;
+            player.angle = -Math.PI / 2;
+            player.health = player.upgrades.health; 
+            player.shieldActive = false;
+            player.shieldTimer = 0;
+            player.radius = player.upgrades.radius; 
+            player.levelStartScore = player.score; 
+            player.killCount = 0; 
+            player.lastShot = 0; 
+
+            // Vider les listes locales
+            bullets = []; asteroids = []; aliens = []; particles = [], stars = [], powerUps = [], debris = [];
+            laserWalls = []; 
+            bosses = []; // NOUVEAU
+            bossSpawned = false; 
+            bruteSpawned = false;
+
+            // NE PAS appeler createAsteroids() ici, l'hôte s'en chargera
+            
+            if (stars.length === 0) createStars();
+            
+            lastShotTime = 0;
+            alienSpawnTimer = 0;
+            powerUpSpawnTimer = 0;
+            bruteAlienSpawnTimer = 0;
+            autoTurretTimer = 0;
+            eventTimer = 120000; 
+            currentEvent = null; 
+        }
+
+        // NOUVEAU: Fonction de création du Boss (écrit sur DB)
+        async function createBoss() {
+            const b = {
+                type: 'boss',
+                x: Math.random() * MAP_SIZE, 
+                y: Math.random() * MAP_SIZE, 
+                radius: 60, 
+                maxHealth: 15000, 
+                health: 15000, 
+                color: '#FFD700', 
+                speed: 0.2 * GAME_SPEED,
+                angle: 0,
+                fireRate: 500, 
+                bombRate: 3000, 
+                laserRate: 5000, 
+                lastShotTime: 0,
+                lastBombTime: 0,
+                lastLaserTime: 0,
+                bulletSpeed: 4 * GAME_SPEED, 
+                bulletRadius: 8,
+                level: "BOSS" // NOUVEAU
+            };
+            try {
+                // Ajouter à la DB (ce qui l'ajoutera localement pour tout le monde)
+                await addDoc(collection(db, `${dbGameDataRoot}/world_objects`), b); // CORRECTION
+            } catch (e) {}
+        }
+
+        // NOUVEAU: Mise à jour du Boss (LOCAL À L'HÔTE)
+        function updateBosses() {
+            // CORRECTION: Tourne sur TOUS les clients, mais seul l'hôte tire
+            if (!player || bosses.length === 0) return; 
+
+            for (const boss of bosses) {
+                // Mouvement Homing (local pour tous les joueurs)
+                const angleToTarget = Math.atan2(player.y - boss.y, player.x - boss.x);
+                boss.angle = angleToTarget; // Viser le joueur local
+                const movementAngle = angleToTarget + Math.sin(Date.now() * 0.0005) * 0.5;
+                boss.x += Math.cos(movementAngle) * boss.speed;
+                boss.y += Math.sin(movementAngle) * boss.speed;
+                
+                // L'HÔTE est le seul à générer des tirs (qui sont locaux)
+                if (isHost) {
+                    boss.lastShotTime += 16;
+                    if (boss.lastShotTime >= boss.fireRate) {
+                        boss.lastShotTime = 0;
+                        fireBossBullet(boss, angleToTarget); 
+                    }
+                    
+                    boss.lastBombTime += 16;
+                    if (boss.lastBombTime >= boss.bombRate) {
+                        boss.lastBombTime = 0;
+                        fireBossBomb(boss, angleToTarget); 
+                    }
+                    
+                    boss.lastLaserTime += 16;
+                    if (boss.lastLaserTime >= boss.laserRate) {
+                        boss.lastLaserTime = 0;
+                        fireBossLaser(boss, angleToTarget); 
+                    }
+                }
+            }
+        }
+
+        // NOUVEAU: Le Boss tire (normal)
+        function fireBossBullet(boss, angleToPlayer) {
+            bullets.push({
+                x: boss.x + Math.cos(angleToPlayer) * boss.radius,
+                y: boss.y + Math.sin(angleToPlayer) * boss.radius,
+                radius: boss.bulletRadius,
+                speedX: Math.cos(angleToPlayer) * boss.bulletSpeed,
+                speedY: Math.sin(angleToPlayer) * boss.bulletSpeed,
+                isBossBullet: true,
+                color: '#ff8800'
+            });
+            if(audioReady) alienShootSound.triggerAttackRelease("A3", "0.05"); 
+        }
+        
+        // NOUVEAU: Le Boss tire (Bombe)
+        function fireBossBomb(boss, angleToPlayer) {
+             bullets.push({
+                x: boss.x + Math.cos(angleToPlayer) * boss.radius,
+                y: boss.y + Math.sin(angleToPlayer) * boss.radius,
+                radius: 15, // Plus grosse
+                speedX: Math.cos(angleToPlayer) * (boss.bulletSpeed * 0.5), // Plus lente
+                speedY: Math.sin(angleToPlayer) * (boss.bulletSpeed * 0.5),
+                isBossBullet: true, 
+                isBomb: true, // NOUVEAU
+                color: '#800080' // Violette
+            });
+        }
+        
+        // NOUVEAU: Tir Laser du Boss
+        function fireBossLaser(boss, angle) {
+             let wall = {
+                 x1: boss.x,
+                 y1: boss.y,
+                 x2: boss.x + Math.cos(angle) * 2000,
+                 y2: boss.y + Math.sin(angle) * 2000,
+                 speedX: 0, speedY: 0,
+                 life: 1000, // Dure 1 seconde
+                 isBossLaser: true,
+                 color: '#FFD700'
+             };
+             laserWalls.push(wall);
+        }
+
+
+        // Démarrage d'une partie Solo (au centre)
+        function startSoloGame() {
+            if (gameState !== 'MENU' || !player) return;
+            isHost = true; // En solo, vous êtes l'hôte
+            resetLevel(MAP_SIZE / 2, MAP_SIZE / 2);
+            createAsteroids(); // Créer les astéroïdes en solo
+            setGameState('GAME');
+            // gameLoop(); // Appelé par setGameState
+        }
+
+        // Démarrage d'une partie Multijoueur (avec téléportation)
+        function startMultiplayerGame() {
+            if (gameState !== 'MENU' || !player) return;
+
+            let startX = MAP_SIZE / 2;
+            let startY = MAP_SIZE / 2;
+
+            if (otherPlayers.length > 0) {
+                // Téléportation à proximité du premier joueur trouvé
+                const target = otherPlayers[0];
+                startX = target.x + (Math.random() > 0.5 ? 100 : -100); 
+                startY = target.y + (Math.random() > 0.5 ? 100 : -100);
+            }
+            
+            resetLevel(startX, startY);
+            setGameState('GAME');
+            // gameLoop(); // Appelé par setGameState
+        }
+        
+        function gameLoop() {
+            if (gameIsOver) return; // S'arrêter si on n'est plus en jeu
+            requestAnimationFrame(gameLoop);
+            update();
+            draw();
+        }
+        
+        // CORRECTION: Déplacer la définition de updateLaserWalls AVANT update()
+        function updateLaserWalls() {
+             for (let i = laserWalls.length - 1; i >= 0; i--) {
+                 const wall = laserWalls[i];
+                 wall.x1 += wall.speedX;
+                 wall.y1 += wall.speedY;
+                 wall.x2 += wall.speedX;
+                 wall.y2 += wall.speedY;
+                 wall.life -= 16;
+                 if (wall.life <= 0) {
+                     laserWalls.splice(i, 1);
+                 }
+             }
+        }
+
+
+        function update() {
+            // NOUVEAU: Seul l'hôte gère les spawns et les événements
+            if (isHost) {
+                // Logique d'apparition du Boss
+                if (player.score >= BOSS_SPAWN_SCORE && !bossSpawned && bosses.length === 0 && !currentEvent) { 
+                    syncEvent({ type: 'boss_spawn', title: translations[currentLang].alert_boss || '!! BOSS DETECTE !!' }); // MODIFIÉ
+                    createBoss(); // NOUVEAU: Crée le boss dans la DB
+                    bossSpawned = true;
+                }
+                
+                // Logique d'apparition des Brutes
+                if (player.score >= BRUTE_SPAWN_SCORE && !bruteSpawned && bruteAliens.length === 0 && !currentEvent) { 
+                    spawnBruteAlien();
+                    bruteSpawned = true;
+                }
+                
+                updateSpawners(); 
+                updateEvents(); 
+            }
+            
+            // Tout le monde met à jour son propre vaisseau, les tirs, les particules, etc.
+            updatePlayer(); 
+            updateBullets(); 
+            updateAsteroids(); 
+            updateAliens();
+            updateBruteAliens(); 
+            updateBosses(); // NOUVEAU: Tout le monde met à jour la position du boss
+            updateStars(); 
+            updateParticles(); 
+            updatePowerUps();
+            updateLaserWalls(); 
+            
+            checkCollisions(); 
+            updateAllUI();
+            
+            // NOUVEAU: Mettre à jour le classement en direct
+            const now = Date.now();
+            if (now - lastLeaderboardUpdateTime > 5000) { // Update every 5 seconds
+                lastLeaderboardUpdateTime = now;
+                updateLeaderboard(player.playerName, player.score);
+            }
+            
+            if (Math.floor(Date.now() / 16) % 10 === 0) {
+                 updatePlayerPosition();
+            }
+        }
+
+        function draw() {
+            ctx.fillStyle = '#000'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+            drawStars(); 
+            
+            // NOUVEAU: Dessin du cercle limite en jeu
+            drawMapBoundary();
+
+            // Dessiner les éléments relatifs au joueur (centrés)
+            drawBosses(); // NOUVEAU
+            drawLaserWalls(); // NOUVEAU (Lasers du boss)
+            drawPlayer(); 
+            drawBullets(); 
+            drawAsteroids(); 
+            drawAliens();
+            drawBruteAliens(); // NOUVEAU
+            drawDebris(); 
+            drawPowerUps();
+            
+            // Dessiner les particules (effet de flamme) par-dessus tout le reste (sauf l'UI)
+            drawParticles(); 
+
+            // drawMiniMap(); // SUPPRIMÉ
+        }
+        
+        // NOUVEAU: Dessin des Boss
+        function drawBosses() {
+            if (!player || bosses.length === 0) return;
+
+            ctx.save();
+            ctx.translate(-(player.x - canvas.width / 2), -(player.y - canvas.height / 2));
+
+            bosses.forEach(boss => {
+                ctx.save(); // Sauvegarder pour chaque boss
+                ctx.translate(boss.x, boss.y);
+                
+                ctx.shadowColor = boss.color;
+                ctx.shadowBlur = 40;
+                ctx.strokeStyle = boss.color;
+                ctx.lineWidth = 5;
+                
+                // Forme de vaisseau
+                ctx.beginPath();
+                ctx.moveTo(boss.radius, 0);
+                ctx.lineTo(-boss.radius, -boss.radius * 0.7);
+                ctx.lineTo(-boss.radius, boss.radius * 0.7);
+                ctx.closePath();
+                ctx.stroke();
+
+                // NOUVEAU: Afficher le niveau (ou "BOSS")
+                ctx.fillStyle = boss.color;
+                ctx.font = '12px Consolas';
+                ctx.textAlign = 'center';
+                ctx.shadowBlur = 10;
+                let levelText = boss.isUltraBoss ? translations[currentLang].level_ultra : translations[currentLang].level_boss;
+                ctx.fillText(levelText, 0, -boss.radius - 15);
+                
+                ctx.restore(); // Restaurer pour le prochain boss
+            });
+            
+            ctx.restore(); // Restaurer la translation de la caméra
+            ctx.shadowBlur = 0;
+        }
+
+        // NOUVEAU: Dessin du Mur Laser (Maintenant pour le Boss)
+        function drawLaserWalls() {
+            if (!player) return;
+            ctx.save();
+            ctx.translate(-(player.x - canvas.width / 2), -(player.y - canvas.height / 2));
+            
+            laserWalls.forEach(wall => {
+                ctx.strokeStyle = wall.color || '#ff0000';
+                ctx.shadowColor = wall.color || '#ff0000';
+                ctx.shadowBlur = 20;
+                // NOUVEAU: Largeur différente pour les lasers
+                ctx.lineWidth = wall.isAlienLaser ? 3 : 15;
+                
+                ctx.beginPath();
+                ctx.moveTo(wall.x1, wall.y1);
+                ctx.lineTo(wall.x2, wall.y2);
+                ctx.stroke();
+            });
+            
+            ctx.restore();
+            ctx.shadowBlur = 0;
+        }
+
+        // NOUVEAU: Fonction pour dessiner la limite de la carte
+        function drawMapBoundary() {
+            const centerX = MAP_SIZE / 2;
+            const centerY = MAP_SIZE / 2;
+            const playerRelativeX = canvas.width / 2;
+            const playerRelativeY = canvas.height / 2;
+
+            // Calculer la position relative du centre de la carte par rapport à la vue du joueur
+            const mapCenterXOnScreen = playerRelativeX - (player.x - centerX);
+            const mapCenterYOnScreen = playerRelativeY - (player.y - centerY);
+
+            ctx.save();
+            ctx.translate(mapCenterXOnScreen, mapCenterYOnScreen);
+            
+            // Lueur forte pour un effet visuel
+            ctx.shadowColor = '#ff0000';
+            ctx.shadowBlur = 40; 
+            
+            // Dessin du cercle
+            ctx.strokeStyle = `rgba(255, 0, 0, 0.8)`;
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.arc(0, 0, MAP_BOUND_RADIUS, 0, Math.PI * 2);
+            ctx.stroke();
+
+            ctx.restore();
+            ctx.shadowBlur = 0;
+        }
+
+        // NOUVEAU: Gérer les timers d'événements
+        function updateEvents() {
+            if (gameIsOver || gameState !== 'GAME') return;
+
+            // Gérer le timer d'événement
+            if (bosses.length === 0 && !currentEvent) { // Ne pas déclencher si un boss est déjà là
+                eventTimer -= 16;
+                if (eventTimer <= 0) {
+                    triggerRandomEvent();
+                    // Réinitialiser le timer pour le prochain événement (entre 3 et 5 minutes)
+                    eventTimer = (Math.random() * (EVENT_INTERVAL_MAX - EVENT_INTERVAL_MIN)) + EVENT_INTERVAL_MIN; 
+                }
+            }
+        }
+
+        // NOUVEAU: Déclencher un événement (par l'hôte)
+        function triggerRandomEvent() {
+            const roll = Math.random(); 
+            let eventData = {};
+            const lang = translations[currentLang];
+
+            if (roll < 0.4) { // 40% de chance d'invasion simple
+                eventData = { type: 'invasion', kills: 13, title: lang.alert_invasion.replace('{kills}', 13) };
+                // Lancer l'invasion (ex: 5 aliens d'un coup)
+                for(let i=0; i<5; i++) {
+                    setTimeout(() => spawnAlien(1), i * 500); // Échelonner l'arrivée (Niveau 1)
+                }
+            } else if (roll < 0.7) { // 30% de chance de Mega-Brute
+                eventData = { type: 'mega_brute', title: lang.alert_mega_brute };
+                spawnMegaBrute(); // Nouvelle fonction
+            } else { // 30% de chance de Boss/Ultra-Boss (si le score le permet)
+                if (player.score > 5000) { 
+                    eventData = { type: 'ultra_boss', title: lang.alert_ultra_boss };
+                    spawnUltraBoss(); // Nouvelle fonction
+                } else {
+                    eventData = { type: 'invasion', kills: 3, title: lang.alert_invasion_small.replace('{kills}', 3) };
+                    for(let i=0; i<3; i++) { setTimeout(() => spawnAlien(1), i * 500); }
+                }
+            }
+            
+            // Envoyer l'événement à tous les joueurs
+            syncEvent(eventData);
+        }
+        
+        // NOUVEAU: Afficher l'alerte
+        function showEventAlert(message) {
+            if (!eventAlertElement) return;
+            
+            eventAlertElement.innerText = message;
+            eventAlertElement.style.display = 'block';
+            
+            // Retirer l'animation pour la redémarrer
+            eventAlertElement.style.animation = 'none';
+            // Forcer le recalcul du style
+            void eventAlertElement.offsetWidth; 
+            
+            eventAlertElement.style.animation = 'alertPulse 5s forwards';
+
+            // Cacher après 5 secondes (fin de l'animation)
+            setTimeout(() => {
+                if(eventAlertElement && eventAlertElement.innerText === message) eventAlertElement.style.display = 'none';
+            }, 5000);
+        }
+
+        // NOUVEAU: Afficher l'alerte de succès
+        function showSuccessAlert(message) {
+            if (!eventSuccessElement) return;
+            
+            eventSuccessElement.innerText = message;
+            eventSuccessElement.style.display = 'block';
+            
+            // Ajouter la classe 'success'
+            eventSuccessElement.classList.add('success');
+            
+            // Retirer l'animation pour la redémarrer
+            eventSuccessElement.style.animation = 'none';
+            void eventSuccessElement.offsetWidth; 
+            eventSuccessElement.style.animation = 'alertPulse 5s forwards';
+
+            // Cacher après 5 secondes
+            setTimeout(() => {
+                if(eventSuccessElement && eventSuccessElement.innerText === message) eventSuccessElement.style.display = 'none';
+            }, 5000);
+        }
+
+        // --- NOUVEAU: Logique des Joysticks ---
+        
+        function setupJoystickListeners() {
+            // --- Joystick de Mouvement (Gauche) ---
+            moveArea.addEventListener('touchstart', (e) => {
+                e.preventDefault();
+                if (moveTouchId === null) { // Ne prendre que le premier doigt
+                    const touch = e.changedTouches[0];
+                    moveTouchId = touch.identifier;
+                    
+                    // Positionner le joystick au point de contact
+                    const rect = moveArea.getBoundingClientRect();
+                    moveStartPos.x = touch.clientX - rect.left;
+                    moveStartPos.y = touch.clientY - rect.top;
+                    
+                    moveBase.style.left = `${moveStartPos.x}px`;
+                    moveBase.style.top = `${moveStartPos.y}px`;
+                    moveStick.style.left = `${moveStartPos.x}px`;
+                    moveStick.style.top = `${moveStartPos.y}px`;
+                    
+                    moveBase.style.display = 'block';
+                    moveStick.style.display = 'block';
+                }
+            }, { passive: false });
+
+            moveArea.addEventListener('touchmove', (e) => {
+                e.preventDefault();
+                if (moveTouchId !== null) {
+                    let touch = null;
+                    for (let i = 0; i < e.changedTouches.length; i++) {
+                        if (e.changedTouches[i].identifier === moveTouchId) {
+                            touch = e.changedTouches[i];
+                            break;
+                        }
+                    }
+                    if (!touch) return;
+
+                    const rect = moveArea.getBoundingClientRect();
+                    const currentPos = { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
+                    
+                    let deltaX = currentPos.x - moveStartPos.x;
+                    let deltaY = currentPos.y - moveStartPos.y;
+                    
+                    const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+                    
+                    if (distance > maxJoyRadius) {
+                        deltaX = (deltaX / distance) * maxJoyRadius;
+                        deltaY = (deltaY / distance) * maxJoyRadius;
+                    }
+                    
+                    moveStick.style.left = `${moveStartPos.x + deltaX}px`;
+                    moveStick.style.top = `${moveStartPos.y + deltaY}px`;
+                    
+                    // Mettre à jour l'état des contrôles
+                    controlState.left = (deltaX < -joyThreshold);
+                    controlState.right = (deltaX > joyThreshold);
+                    controlState.thrust = (deltaY < -joyThreshold);
+                }
+            }, { passive: false });
+
+            moveArea.addEventListener('touchend', (e) => {
+                e.preventDefault();
+                for (let i = 0; i < e.changedTouches.length; i++) {
+                    if (e.changedTouches[i].identifier === moveTouchId) {
+                        moveTouchId = null;
+                        moveBase.style.display = 'none';
+                        moveStick.style.display = 'none';
+                        controlState.left = false;
+                        controlState.right = false;
+                        controlState.thrust = false;
+                        break;
+                    }
+                }
+            }, { passive: false });
+            
+            // --- Joystick d'Action (Droite) ---
+            actionArea.addEventListener('touchstart', (e) => {
+                e.preventDefault();
+                if (actionTouchId === null) {
+                    const touch = e.changedTouches[0];
+                    actionTouchId = touch.identifier;
+                    
+                    // Positionner le joystick au point de contact
+                    const rect = actionArea.getBoundingClientRect();
+                    actionStartPos.x = touch.clientX - rect.left;
+                    actionStartPos.y = touch.clientY - rect.top;
+                    
+                    actionBase.style.left = `${actionStartPos.x}px`;
+                    actionBase.style.top = `${actionStartPos.y}px`;
+                    actionStick.style.left = `${actionStartPos.x}px`;
+                    actionStick.style.top = `${actionStartPos.y}px`;
+                    
+                    actionBase.style.display = 'block';
+                    actionStick.style.display = 'block';
+                    
+                    controlState.shoot = true; // Tirer dès qu'on touche
+                }
+            }, { passive: false });
+
+            actionArea.addEventListener('touchmove', (e) => {
+                e.preventDefault();
+                if (actionTouchId !== null) {
+                    let touch = null;
+                    for (let i = 0; i < e.changedTouches.length; i++) {
+                        if (e.changedTouches[i].identifier === actionTouchId) {
+                            touch = e.changedTouches[i];
+                            break;
+                        }
+                    }
+                    if (!touch) return;
+
+                    const rect = actionArea.getBoundingClientRect();
+                    const currentPos = { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
+                    
+                    let deltaX = currentPos.x - actionStartPos.x;
+                    let deltaY = currentPos.y - actionStartPos.y;
+                    
+                    const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+                    
+                    if (distance > maxJoyRadius) {
+                        deltaX = (deltaX / distance) * maxJoyRadius;
+                        deltaY = (deltaY / distance) * maxJoyRadius;
+                    }
+                    
+                    actionStick.style.left = `${actionStartPos.x + deltaX}px`;
+                    actionStick.style.top = `${actionStartPos.y + deltaY}px`;
+                    
+                    controlState.shoot = true; // Continuer de tirer
+                }
+            }, { passive: false });
+
+            actionArea.addEventListener('touchend', (e) => {
+                e.preventDefault();
+                for (let i = 0; i < e.changedTouches.length; i++) {
+                    if (e.changedTouches[i].identifier === actionTouchId) {
+                        actionTouchId = null;
+                        actionBase.style.display = 'none';
+                        actionStick.style.display = 'none';
+                        controlState.shoot = false;
+                        break;
+                    }
+                }
+            }, { passive: false });
+        }
+
+
+        function setupControls() {
+            // --- Contrôles Clavier ---
+            document.addEventListener('keydown', (e) => {
+                if (gameIsOver) return;
+                switch(e.key) {
+                    case 'ArrowUp': case 'w': controlState.thrust = true; break;
+                    case 'ArrowLeft': case 'a': controlState.left = true; break;
+                    case 'ArrowRight': case 'd': controlState.right = true; break;
+                    case ' ': case 'Spacebar': controlState.shoot = true; break;
+                }
+            });
+            document.addEventListener('keyup', (e) => {
+                switch(e.key) {
+                    case 'ArrowUp': case 'w': controlState.thrust = false; break;
+                    case 'ArrowLeft': case 'a': controlState.left = false; break;
+                    case 'ArrowRight': case 'd': controlState.right = false; break;
+                    case ' ': case 'Spacebar': controlState.shoot = false; break;
+                }
+            });
+            
+            // --- NOUVEAU: Contrôles Tactiles (Joysticks) ---
+            if (isMobile()) {
+                setupJoystickListeners();
+            }
+        }
+
+        // NOUVEAU: Fonction pour quitter la partie
+        async function goToMenu() {
+            if (gameState !== 'GAME') return;
+            gameIsOver = true; // Arrête la boucle de jeu
+            
+            // Sauvegarder et mettre à jour le classement
+            await handleGameOverLogic();
+            
+            setGameState('MENU');
+        }
+
+        function setupNavigationListeners() {
+            // CORRECTION: Vérifier si playButton existe avant de lire 'hasListener'
+            if (playButton && playButton.hasListener) return;
+
+            // NOUVEAU: Son de bouton
+            const playSound = () => { if(audioReady) buttonSound.triggerAttackRelease("G5", "0.05"); };
+            
+            // CORRECTION: Ajout de vérifications (null checks) pour tous les boutons
+            if (playButton) playButton.addEventListener('click', () => { playSound(); startSoloGame(); }); 
+            if (multiplayerButton) multiplayerButton.addEventListener('click', () => { playSound(); startMultiplayerGame(); });
+            
+            if (shopButton) shopButton.addEventListener('click', () => { playSound(); setGameState('SHOP'); });
+            if (shopBackButton) shopBackButton.addEventListener('click', () => { playSound(); setGameState('MENU'); });
+            if (restartButton) restartButton.addEventListener('click', () => { playSound(); setGameState('MENU'); }); 
+            
+            // NOUVEAU: Listeners pour les paramètres
+            if (settingsButton) {
+                settingsButton.addEventListener('click', () => { playSound(); setGameState('SETTINGS'); });
+            }
+            if (settingsBackButton) {
+                settingsBackButton.addEventListener('click', () => {
+                    playSound();
+                    setGameState('MENU');
+                    saveGame(true); // Sauvegarder les paramètres en quittant
+                });
+            }
+            if (volumeSlider) {
+                volumeSlider.addEventListener('input', (e) => {
+                    gameSettings.volume = parseFloat(e.target.value);
+                    if (mainVolume) {
+                        mainVolume.volume.value = gameSettings.volume;
+                    }
+                });
+            }
+            if (toggleParticlesButton) {
+                toggleParticlesButton.addEventListener('click', () => {
+                    playSound();
+                    gameSettings.particlesEnabled = !gameSettings.particlesEnabled;
+                    updateAllUI(); // Mettre à jour le texte du bouton
+                });
+            }
+            // NOUVEAU: Listener Musique
+            if (toggleMusicButton) {
+                toggleMusicButton.addEventListener('click', () => {
+                    playSound();
+                    gameSettings.musicEnabled = !gameSettings.musicEnabled;
+                    if (gameSettings.musicEnabled) {
+                        // Démarrer la musique (seulement si on est dans un menu)
+                        if (gameState !== 'GAME' && audioReady) {
+                             Tone.Transport.start();
+                             music.forEach(m => m.start ? m.start(0) : null);
+                        }
+                    } else {
+                        // Arrêter la musique
+                        if (audioReady) {
+                            Tone.Transport.stop();
+                            music.forEach(m => m.stop ? m.stop() : null);
+                        }
+                    }
+                    updateAllUI(); // Mettre à jour le texte
+                });
+            }
+            
+            // NOUVEAU: Listener de Langue
+            if (languageSelect) {
+                languageSelect.addEventListener('change', (e) => {
+                    playSound();
+                    setLanguage(e.target.value);
+                });
+            }
+            
+            // NOUVEAU: Boutons d'upgrade déplacés dans la boutique
+            if (buyFireRateBtn_shop) buyFireRateBtn_shop.addEventListener('click', () => { playSound(); buyUpgrade('fireRate'); });
+            if (buyShipSpeedBtn_shop) buyShipSpeedBtn_shop.addEventListener('click', () => { playSound(); buyUpgrade('shipSpeed'); });
+            if (buyBulletSpeedBtn_shop) buyBulletSpeedBtn_shop.addEventListener('click', () => { playSound(); buyUpgrade('bulletSpeed'); });
+            if (buyMaxHealthBtn_shop) buyMaxHealthBtn_shop.addEventListener('click', () => { playSound(); buyUpgrade('maxHealth'); });
+            if (buyShipSizeBtn) buyShipSizeBtn.addEventListener('click', () => { playSound(); buyUpgrade('radius'); });
+            if (buyBulletDamageBtn) buyBulletDamageBtn.addEventListener('click', () => { playSound(); buyUpgrade('bulletDamage'); });
+            if (buyHealthRegenBtn) buyHealthRegenBtn.addEventListener('click', () => { playSound(); buyUpgrade('healthRegen'); });
+            
+            // NOUVEAU: Boutons d'upgrade en JEU
+            if (upgradeFireRateBtn) upgradeFireRateBtn.addEventListener('click', () => { playSound(); buyUpgrade('fireRate'); });
+            if (upgradeShipSpeedBtn) upgradeShipSpeedBtn.addEventListener('click', () => { playSound(); buyUpgrade('shipSpeed'); });
+            if (upgradeBulletSpeedBtn) upgradeBulletSpeedBtn.addEventListener('click', () => { playSound(); buyUpgrade('bulletSpeed'); });
+            if (upgradeMaxHealthBtn) upgradeMaxHealthBtn.addEventListener('click', () => { playSound(); buyUpgrade('maxHealth'); });
+            if (backToMenuButton) backToMenuButton.addEventListener('click', () => { playSound(); goToMenu(); }); // NOUVEAU
+            
+            // NOUVEAU: Clics pour la boutique (sur le div parent)
+            if (buySkinBlueBtn) buySkinBlueBtn.addEventListener('click', () => { playSound(); buyFromShop('skinBlue'); });
+            if (buySkinRedBtn) buySkinRedBtn.addEventListener('click', () => { playSound(); buyFromShop('skinRed'); });
+            if (buyAutoTurretBtn) buyAutoTurretBtn.addEventListener('click', () => { playSound(); buyFromShop('autoTurret'); });
+            
+            if (playerNameInput) {
+                playerNameInput.addEventListener('change', () => {
+                    const newName = playerNameInput.value.trim().substring(0, 10);
+                    if (player && newName) {
+                        player.playerName = newName;
+                        saveGame(true);
+                    }
+                });
+            }
+
+            if (playButton) playButton.hasListener = true; 
+        }
+
+        // --- Fonctions de dessin ---
+        function drawPlayer(){
+            if(!player)return;
+            // Dessin des autres joueurs
+            otherPlayers.forEach(p=>{
+                ctx.save();
+                ctx.translate(p.x-(player.x-canvas.width/2),p.y-(player.y-canvas.height/2));
+                ctx.rotate(p.angle);
+                
+                // NOUVEAU: Appliquer le skin et la taille des autres joueurs
+                let pColor = p.skin === 'blue' ? '#0088ff' : (p.skin === 'red' ? '#ff4444' : '#aaaaaa');
+                let pRadius = p.radius || 15; // Utiliser la taille synchronisée ou défaut
+                
+                ctx.strokeStyle = pColor;
+                ctx.shadowColor = pColor;
+                ctx.shadowBlur = 10;
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(pRadius, 0); 
+                ctx.lineTo(-pRadius, -pRadius * 0.7); 
+                ctx.lineTo(-pRadius, pRadius * 0.7); 
+                ctx.closePath();
+                ctx.stroke();
+                
+                // NOUVEAU: Afficher la tourelle des autres joueurs
+                if (p.hasAutoTurret) {
+                    const glow=Math.abs(Math.sin(Date.now()*0.005))*0.5+0.5;
+                    ctx.fillStyle=`rgba(255, 200, 0, ${glow})`;
+                    ctx.shadowColor=`rgba(255, 200, 0, ${glow})`;
+                    ctx.shadowBlur=10;
+                    ctx.fillRect(-pRadius*0.8,-pRadius*0.5,5,5);
+                    ctx.fillRect(-pRadius*0.8,pRadius*0.5-5,5,5);
+                }
+                
+                ctx.fillStyle="white";
+                ctx.font="12px Arial";
+                ctx.textAlign="center";
+                ctx.fillText(p.playerName,0,-25);
+                ctx.restore();
+            });
+            
+            // Dessin du joueur local
+            ctx.save();
+            ctx.translate(canvas.width/2,canvas.height/2); // Le joueur local est toujours au centre
+            
+            if(player.shieldActive){ctx.strokeStyle="#ffffff";ctx.fillStyle="rgba(255,255,255,0.2)";ctx.shadowColor="#ffffff";ctx.shadowBlur=30;ctx.lineWidth=3;ctx.beginPath();ctx.arc(0,0,player.radius+5,0,Math.PI*2);ctx.fill();ctx.stroke()}
+            
+            ctx.rotate(player.angle);
+            let pColor=player.skin==="blue"?"#0088ff":player.skin==="red"?"#ff4444":"#ffffff"; // CORRECTION: Couleur par défaut blanche
+            ctx.shadowColor=pColor; ctx.shadowBlur=25; 
+            
+            const level=player.upgrades.level||0;
+            if(level>=5){ctx.strokeStyle="#ff0000";ctx.shadowColor="#ff0000";ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(-player.radius*.5,-player.radius*.7);ctx.lineTo(-player.radius*1.5,-player.radius*1.2);ctx.lineTo(-player.radius*.5,-player.radius*1.5);ctx.stroke();ctx.beginPath();ctx.moveTo(-player.radius*.5,player.radius*.7);ctx.lineTo(-player.radius*1.5,player.radius*1.2);ctx.lineTo(-player.radius*.5,player.radius*1.5);ctx.stroke()}
+            else if(level>=2){ctx.strokeStyle="#0088ff";ctx.shadowColor="#0088ff";ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(-player.radius,-player.radius*.7);ctx.lineTo(-player.radius*1.5,-player.radius*.7);ctx.stroke();ctx.beginPath();ctx.moveTo(-player.radius,player.radius*.7);ctx.lineTo(-player.radius*1.5,player.radius*.7);ctx.stroke()}
+            
+            ctx.shadowColor=pColor; ctx.shadowBlur=25; ctx.strokeStyle=pColor; ctx.lineWidth=2;
+            ctx.beginPath();ctx.moveTo(player.radius,0);ctx.lineTo(-player.radius,-player.radius*.7);ctx.lineTo(-player.radius,player.radius*.7);ctx.closePath();ctx.stroke();
+            
+            if(player.hasAutoTurret){const glow=Math.abs(Math.sin(Date.now()*0.005))*0.5+0.5;ctx.fillStyle=`rgba(255, 200, 0, ${glow})`;ctx.shadowColor=`rgba(255, 200, 0, ${glow})`;ctx.shadowBlur=15;ctx.fillRect(-player.radius*0.8,-player.radius*0.5,5,5);ctx.fillRect(-player.radius*0.8,player.radius*0.5-5,5,5)}
+            if(level>=10){ctx.fillStyle="#ffffff";ctx.shadowColor="#ffffff";ctx.fillRect(player.radius*.8,-player.radius*.2,player.radius*.7,player.radius*.4)}
+            
+            ctx.fillStyle=pColor;ctx.font='bold 14px Arial';ctx.textAlign='center';ctx.fillText(player.playerName,0,30);
+            
+            ctx.restore();
+            ctx.shadowBlur = 0;
+        }
+        
+        function drawAliens(){
+            ctx.save();
+            ctx.translate(-(player.x-canvas.width/2),-(player.y-canvas.height/2));
+            for(const a of aliens){
+                ctx.save();
+                ctx.translate(a.x,a.y);
+                ctx.rotate(a.angle); 
+                
+                ctx.shadowColor = a.color;
+                ctx.shadowBlur = 10;
+                ctx.strokeStyle = a.color;
+                ctx.lineWidth = 2;
+                
+                // NOUVEAU: Forme basée sur le niveau
+                ctx.beginPath();
+                if (a.level === 2) {
+                    // Forme N.2 (Chevron)
+                    ctx.moveTo(a.radius, 0);
+                    ctx.lineTo(-a.radius, -a.radius);
+                    ctx.lineTo(-a.radius * 0.5, 0);
+                    ctx.lineTo(-a.radius, a.radius);
+                    ctx.closePath();
+                } else if (a.level >= 3) {
+                    // Forme N.3 (Élite)
+                    ctx.moveTo(a.radius, 0);
+                    ctx.lineTo(-a.radius, -a.radius * 0.5);
+                    ctx.lineTo(-a.radius, a.radius * 0.5);
+                    ctx.closePath();
+                    ctx.moveTo(-a.radius * 0.5, -a.radius * 0.8);
+                    ctx.lineTo(-a.radius * 1.2, -a.radius * 0.8);
+                    ctx.moveTo(-a.radius * 0.5, a.radius * 0.8);
+                    ctx.lineTo(-a.radius * 1.2, a.radius * 0.8);
+                } else {
+                    // Forme N.1 (Classique)
+                    ctx.moveTo(a.radius, 0); 
+                    ctx.lineTo(-a.radius, -a.radius * 0.7);
+                    ctx.lineTo(-a.radius, a.radius * 0.7);
+                    ctx.closePath();
+                }
+                ctx.stroke();
+
+                // NOUVEAU: Afficher le niveau
+                ctx.fillStyle = a.color;
+                ctx.font = '10px Consolas';
+                ctx.textAlign = 'center';
+                ctx.fillText(`N.${a.level}`, 0, -a.radius - 15);
+                
+                // Barre de vie
+                const barWidth=a.radius*2;const barHeight=5;
+                ctx.fillStyle="#550000";
+                ctx.fillRect(-barWidth/2,-a.radius-barHeight-5,barWidth,barHeight);
+                ctx.fillStyle="#ff0000";
+                ctx.fillRect(-barWidth/2,-a.radius-barHeight-5,barWidth*(a.health/a.maxHealth),barHeight);
+                
+                ctx.restore();
+            }
+            ctx.restore();
+            ctx.shadowBlur=0;
+        }
+        
+        // NOUVEAU: Dessin des "Brutes"
+        function drawBruteAliens() {
+            ctx.save();
+            ctx.translate(-(player.x - canvas.width / 2), -(player.y - canvas.height / 2));
+            for (const a of bruteAliens) {
+                ctx.save();
+                ctx.translate(a.x, a.y);
+                ctx.rotate(a.angle);
+                ctx.shadowColor = a.color;
+                ctx.shadowBlur = 20;
+                
+                // Forme plus large
+                ctx.beginPath();
+                ctx.moveTo(a.radius, 0);
+                ctx.lineTo(-a.radius, -a.radius * 0.9);
+                ctx.lineTo(-a.radius, a.radius * 0.9);
+                ctx.closePath();
+                ctx.strokeStyle = a.color;
+                ctx.lineWidth = 4;
+                ctx.stroke();
+
+                // Barre de vie
+                const barWidth = a.radius * 2;
+                const barHeight = 5;
+                ctx.fillStyle = '#550000';
+                ctx.fillRect(-barWidth / 2, -a.radius - barHeight - 5, barWidth, barHeight);
+                ctx.fillStyle = '#ff0000';
+                ctx.fillRect(-barWidth / 2, -a.radius - barHeight - 5, barWidth * (a.health / a.maxHealth), barHeight);
+                
+                ctx.restore();
+            }
+            ctx.restore();
+            ctx.shadowBlur = 0;
+        }
+
+        function drawBullets(){ctx.save();ctx.translate(-(player.x-canvas.width/2),-(player.y-canvas.height/2));ctx.shadowColor="#ffff00";ctx.shadowBlur=15;for(const b of bullets){ctx.fillStyle=b.isBossBullet?'#ff8800':(b.isBruteBullet?'#800080':(b.isAlienBullet?'#ff8888':'#ffff00'));ctx.beginPath();ctx.arc(b.x,b.y,b.radius,0,Math.PI*2);ctx.fill()}ctx.restore();ctx.shadowBlur=0}
+        function drawAsteroids(){ctx.save();ctx.translate(-(player.x-canvas.width/2),-(player.y-canvas.height/2));ctx.shadowColor="#ffffff";ctx.shadowBlur=15;for(const a of asteroids){ctx.strokeStyle="#ffffff";ctx.lineWidth=2;ctx.beginPath();ctx.arc(a.x,a.y,a.radius,0,Math.PI*2);ctx.stroke()}ctx.restore();ctx.shadowBlur=0}
+        function drawDebris(){ctx.save();ctx.translate(-(player.x-canvas.width/2),-(player.y-canvas.height/2));ctx.shadowColor="#ffffff";ctx.shadowBlur=5;for(const d of debris){ctx.save();ctx.translate(d.x,d.y);ctx.rotate(d.angle);ctx.strokeStyle="#ffffff";ctx.lineWidth=1;ctx.beginPath();ctx.rect(-d.radius,-d.radius,d.radius*2,d.radius*2);ctx.stroke();ctx.restore()}ctx.restore();ctx.shadowBlur=0}
+        
+        function drawStars(){
+            ctx.save();
+            for(const s of stars){
+                ctx.fillStyle="#ffffff";
+                ctx.beginPath();
+                // CORRECTION: s.Y (majuscule) était une erreur, remplacé par s.y (minuscule)
+                ctx.arc(s.x, s.y, s.speed, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            ctx.restore();
+        }
+        
+        function drawParticles(){if (!gameSettings.particlesEnabled) return; ctx.save();ctx.translate(-(player.x-canvas.width/2),-(player.y-canvas.height/2));for(let i=particles.length-1;i>=0;i--){const p=particles[i];ctx.globalAlpha=p.life/p.maxLife;ctx.fillStyle=p.color;ctx.beginPath();ctx.arc(p.x,p.y,p.radius,0,Math.PI*2);ctx.fill()}ctx.globalAlpha=1;ctx.restore()}
+        
+        // NOUVEAU: Dessin des Power-Ups (Thème Blanc)
+        function drawPowerUps(){
+            ctx.save();
+            ctx.translate(-(player.x - canvas.width / 2), -(player.y - canvas.height / 2));
+            for(const p of powerUps){
+                ctx.shadowColor="#ffffff";
+                ctx.shadowBlur = 20;
+                ctx.fillStyle="rgba(255,255,255,0.7)";
+                ctx.strokeStyle="#ffffff";
+                ctx.lineWidth=2;
+                ctx.beginPath();
+                ctx.arc(p.x,p.y,p.radius,0,Math.PI*2);
+                ctx.fill();
+                ctx.stroke();
+                ctx.globalAlpha=p.life/100;
+                ctx.fillStyle="#ffffff";
+                ctx.beginPath();
+                ctx.arc(p.x,p.y,p.radius*.5,0,Math.PI*2);
+                ctx.fill();
+                ctx.globalAlpha=1;
+            }
+            ctx.restore();
+            ctx.shadowBlur=0;
+        }
+
+        // Mini-Map (Fonction vide, car supprimée)
+        function drawMiniMap() { }
+
+        // --- Fonctions de mise à jour ---
+        
+        function updatePlayer() {
+            if (!player) return;
+            if (controlState.left) player.angle -= playerTurnSpeed; // CORRECTION: Vitesse de rotation rapide (0.03)
+            if (controlState.right) player.angle += playerTurnSpeed; // CORRECTION: Vitesse de rotation rapide (0.03)
+            if (controlState.thrust) {
+                player.x += Math.cos(player.angle) * player.upgrades.speed;
+                player.y += Math.sin(player.angle) * player.upgrades.speed;
+                spawnThrusterParticle();
+            } 
+
+            if (controlState.shoot) { fireBullet() }
+            checkMapBounds();
+            if (player.shieldActive) {
+                player.shieldTimer -= 16;
+                if (player.shieldTimer <= 0) { player.shieldActive = false; player.shieldTimer = 0 }
+            }
+            if (player.hasAutoTurret) {
+                autoTurretTimer += 16;
+                if (autoTurretTimer >= autoTurretFireRate) { autoTurretTimer = 0; fireAutoTurret() }
+            }
+
+            // NOUVEAU: Régénération de vie (Maintenant à l'intérieur de updatePlayer)
+            if (player.upgrades.healthRegen > 0 && player.health < player.upgrades.health) {
+                player.health += player.upgrades.healthRegen;
+                if (player.health > player.upgrades.health) {
+                    player.health = player.upgrades.health;
+                }
+            }
+        }
+        
+        // NOUVEAU: Vérifie les limites de la carte
+        function checkMapBounds() {
+            const centerX = MAP_SIZE / 2;
+            const centerY = MAP_SIZE / 2;
+            const distance = getDistance({x: player.x, y: player.y}, {x: centerX, y: centerY});
+            
+            if (distance > MAP_BOUND_RADIUS) {
+                // Perte de vie si en dehors de la limite
+                playerHit(1); // 1 point de dégât par frame
+            }
+        }
+
+        function fireBullet(){
+            if(!player) return;
+            const now = Date.now();
+            // CORRECTION DE BUG: Doit utiliser player.upgrades.fireRate
+            if(now - lastShotTime < player.upgrades.fireRate) return; 
+            lastShotTime = now;
+            player.lastShot = now; // NOUVEAU: Pour la synchro
+
+            bullets.push({
+                x: player.x + Math.cos(player.angle) * player.radius,
+                y: player.y + Math.sin(player.angle) * player.radius,
+                radius: 4,
+                speedX: Math.cos(player.angle) * player.upgrades.bulletSpeed,
+                speedY: Math.sin(player.angle) * player.upgrades.bulletSpeed
+            });
+            
+            // CORRECTION: Déplacé à l'intérieur de la fonction
+            if(audioReady) shootSound.triggerAttackRelease("C5", "0.1"); 
+        }
+        
+        // NOUVEAU: Tir cosmétique pour les autres joueurs
+        function fireCosmeticBullet(otherPlayer) {
+            // CORRECTION: Son du tir des autres joueurs supprimé
+            // if(audioReady) alienShootSound.triggerAttackRelease("C4", "0.05"); 
+            
+            // Créer une balle visuelle
+            bullets.push({
+                x: otherPlayer.x + Math.cos(otherPlayer.angle) * otherPlayer.radius,
+                y: otherPlayer.y + Math.sin(otherPlayer.angle) * otherPlayer.radius,
+                radius: 4,
+                speedX: Math.cos(otherPlayer.angle) * defaultSaveData.upgrades.bulletSpeed, // Utiliser une vitesse de base
+                speedY: Math.sin(otherPlayer.angle) * defaultSaveData.upgrades.bulletSpeed,
+                isCosmetic: true // NOUVEAU: Marqueur pour ne pas causer de dégâts
+            });
+        }
+        
+        function fireAutoTurret(){
+            if(!player) return;
+            for(let i = 0; i < 8; i++){
+                const angle = (Math.PI/4) * i;
+                bullets.push({
+                    x: player.x,
+                    y: player.y,
+                    radius: 3,
+                    speedX: Math.cos(angle) * (player.upgrades.bulletSpeed * 0.65),
+                    speedY: Math.sin(angle) * (player.upgrades.bulletSpeed * 0.65)
+                });
+            }
+            // CORRECTION: Déplacé à l'intérieur de la fonction
+            if(audioReady) shootSound.triggerAttackRelease("G4", "0.1"); 
+        }
+
+        function updateBullets(){for(let i=bullets.length-1;i>=0;i--){const b=bullets[i];b.x+=b.speedX;b.y+=b.speedY;}}
+        
+        // NOUVEAU: Création des astéroïdes (par l'hôte)
+        async function createAsteroids(){
+            if(!player) return;
+            const safeRadius = 500; 
+
+            for(let i=0; i<numAsteroids; i++){
+                let x, y, attempts = 0;
+                
+                do {
+                    x = Math.random() * MAP_SIZE;
+                    y = Math.random() * MAP_SIZE;
+                    attempts++;
+                } while (getDistance({x, y}, {x: player.x, y: player.y}) < safeRadius && attempts < 100); 
+
+                const a = {
+                    type: 'asteroid',
+                    radius:Math.random()*25+15,
+                    x:x,
+                    y:y,
+                    speedX:(Math.random()-.5)*0.6*GAME_SPEED,
+                    speedY:(Math.random()-.5)*0.6*GAME_SPEED
+                };
+                
+                // Écrire dans la base de données au lieu du tableau local
+                try {
+                    await addDoc(collection(db, `${dbGameDataRoot}/world_objects`), a); // CORRECTION
+                } catch (e) {
+                    console.error("Erreur création astéroïde: ", e);
+                }
+            }
+        } 
+        
+        function respawnAsteroid(asteroid) {
+             // Cette fonction est maintenant seulement utilisée pour la destruction locale
+             // La VRAIE réapparition sera gérée par l'hôte via updateSpawners
+             console.log("Astéroïde local détruit, l'hôte le recréera.");
+        }
+
+        function updateAsteroids(){
+            for(const a of asteroids){
+                a.x+=a.speedX;
+                a.y+=a.speedY;
+                wrapCoordinates(a, MAP_SIZE, MAP_SIZE); // NOUVEAU: Wrap sur la MAP
+            }
+        }
+        
+        function updateAliens(){
+            if(!player)return;
+            for(const a of aliens){
+                // CORRECTION: Mouvement Homing (suit le joueur)
+                const angleToPlayer = Math.atan2(player.y-a.y,player.x-a.x);
+                a.angle=angleToPlayer;
+                a.x+=Math.cos(angleToPlayer)*a.speed;
+                a.y+=Math.sin(angleToPlayer)*a.speed;
+                
+                // Tir (toujours local, ok)
+                a.lastShotTime += 16;
+                if (a.lastShotTime >= a.fireRate) {
+                    a.lastShotTime = 0;
+                    fireAlienBullet(a);
+                }
+                
+                // NOUVEAU: Tir Laser (Niveau 3+)
+                if (a.shootsLaser) {
+                    a.lastLaserTime += 16;
+                    if (a.lastLaserTime >= a.laserRate) {
+                        a.lastLaserTime = 0;
+                        fireAlienLaser(a, angleToPlayer);
+                    }
+                }
+            }
+        }
+        
+        // NOUVEAU: Tir des aliens de base
+        function fireAlienBullet(alien) {
+            bullets.push({
+                x: alien.x + Math.cos(alien.angle) * alien.radius,
+                y: alien.y + Math.sin(alien.angle) * alien.radius,
+                radius: 4,
+                speedX: Math.cos(alien.angle) * 3 * GAME_SPEED, // Tirs lents
+                speedY: Math.sin(alien.angle) * 3 * GAME_SPEED,
+                isAlienBullet: true, 
+                color: '#ff8888' // Rose/Rouge
+            });
+            // CORRECTION: Utiliser le son alien dédié
+            if(audioReady) alienShootSound.triggerAttackRelease("C3", "0.05"); 
+        }
+        
+        // NOUVEAU: Tir laser des aliens de haut niveau
+        function fireAlienLaser(alien, angle) {
+            let wall = {
+                 x1: alien.x,
+                 y1: alien.y,
+                 x2: alien.x + Math.cos(angle) * 300, // Laser court (300px)
+                 y2: alien.y + Math.sin(angle) * 300,
+                 speedX: 0, speedY: 0,
+                 life: 500, // Dure 0.5 seconde
+                 isAlienLaser: true, // Marqueur différent
+                 color: '#ffffff'
+             };
+             laserWalls.push(wall);
+        }
+        
+        // NOUVEAU: Mise à jour des "Brutes"
+        function updateBruteAliens() {
+            if (!player) return;
+            for (const a of bruteAliens) {
+                // CORRECTION: Mouvement Homing (suit le joueur)
+                const angleToPlayer = Math.atan2(player.y - a.y, player.x - a.x);
+                a.angle = angleToPlayer;
+                a.x += Math.cos(angleToPlayer) * a.speed;
+                a.y += Math.sin(angleToPlayer) * a.speed;
+
+                // Tir (toujours local, ok)
+                a.lastShotTime += 16;
+                if (a.lastShotTime >= a.fireRate) {
+                    a.lastShotTime = 0;
+                    fireBruteBullet(a);
+                }
+            }
+        }
+
+        // NOUVEAU: Tir des "Brutes"
+        function fireBruteBullet(brute) {
+            bullets.push({
+                x: brute.x + Math.cos(brute.angle) * brute.radius,
+                y: brute.y + Math.sin(brute.angle) * brute.radius,
+                radius: 6,
+                speedX: Math.cos(brute.angle) * 3 * GAME_SPEED, // Tirs lents
+                speedY: Math.sin(brute.angle) * 3 * GAME_SPEED,
+                isBruteBullet: true, 
+                color: '#800080' // Violet
+            });
+            if(audioReady) alienShootSound.triggerAttackRelease("G2", "0.2"); // CORRECTION: Utiliser le son alien dédié
+        }
+        
+        function createDebris(x, y, radius) {if (!gameSettings.particlesEnabled) return; const debrisCount = Math.floor(radius / 5);for (let i = 0; i < debrisCount; i++) {const angle = Math.random() * Math.PI * 2;const speed = Math.random() * 2 + 1;debris.push({x: x,y: y,radius: Math.random() * 3 + 1,angle: Math.random() * Math.PI * 2,speedX: Math.cos(angle) * speed * GAME_SPEED,speedY: Math.sin(angle) * speed * GAME_SPEED,color: '#ffffff',life: 40 })}}
+        function updateDebris() {if (!gameSettings.particlesEnabled) return; for (let i = debris.length - 1; i >= 0; i--) {const d = debris[i];d.x += d.speedX;d.y += d.speedY;d.angle += 0.1;d.life--;if (d.life<=0){debris.splice(i,1);}}}
+        
+        // CORRECTION: Écrit dans la DB (par l'hôte) + NIVEAUX
+        async function spawnAlien(){
+            // Déterminer le niveau en fonction du score de l'hôte
+            let level = 1;
+            if (player.score > 5000) {
+                level = 3; // 
+            } else if (player.score > 2000) {
+                level = 2;
+            }
+            
+            const e=Math.floor(Math.random()*4);let x,y;if(e===0){x=-20;y=Math.random()*MAP_SIZE}else if(e===1){x=MAP_SIZE+20;y=Math.random()*MAP_SIZE}else if(e===2){x=Math.random()*MAP_SIZE;y=-20}else{x=Math.random()*MAP_SIZE;y=MAP_SIZE+20}
+            
+            let color = '#ff0000'; // N.1
+            let speed = 0.3 * GAME_SPEED;
+            let health = 100;
+            let shootsLaser = false;
+            let laserRate = 0;
+            let lastLaserTime = 0;
+
+            if (level === 2) {
+                color = '#cc00ff'; // N.2 Violet
+                speed = 0.4 * GAME_SPEED;
+                health = 150;
+            } else if (level >= 3) {
+                color = '#ffffff'; // N.3 Blanc
+                speed = 0.5 * GAME_SPEED;
+                health = 200;
+                shootsLaser = true;
+                laserRate = 5000; // Tire un laser toutes les 5 sec
+            }
+            
+            const a = {
+                type: 'alien',
+                x:x,y:y,radius:12,color:color,
+                speed: speed, 
+                angle: 0, 
+                health: health, maxHealth: health, 
+                fireRate: 13000, lastShotTime: 0,
+                level: level, // NOUVEAU
+                shootsLaser: shootsLaser, // NOUVEAU
+                laserRate: laserRate, // NOUVEAU
+                lastLaserTime: lastLaserTime // NOUVEAU
+            };
+            try {
+                await addDoc(collection(db, `${dbGameDataRoot}/world_objects`), a); // CORRECTION
+            } catch(e) {}
+        }
+        
+        // NOUVEAU: Spawn des "Brutes" (par l'hôte)
+        async function spawnBruteAlien() {
+            const e=Math.floor(Math.random()*4);let x,y;if(e===0){x=-20;y=Math.random()*MAP_SIZE}else if(e===1){x=MAP_SIZE+20;y=Math.random()*MAP_SIZE}else if(e===2){x=Math.random()*MAP_SIZE;y=-20}else{x=Math.random()*MAP_SIZE;y=MAP_SIZE+20}
+            
+            const b = {
+                type: 'brute',
+                x:x, y:y, radius: 25, color: '#800080', 
+                speed: 0.3 * GAME_SPEED, // CORRECTION: Vitesse pour le homing
+                angle: 0, 
+                health: 500, maxHealth: 500,
+                fireRate: 5000, lastShotTime: 0
+            };
+             try {
+                await addDoc(collection(db, `${dbGameDataRoot}/world_objects`), b); // CORRECTION
+            } catch(e) {}
+        }
+        
+        // NOUVEAU: Spawn de la Mega Brute (Écrit sur DB)
+        async function spawnMegaBrute() {
+            const e=Math.floor(Math.random()*4);let x,y;if(e===0){x=-20;y=Math.random()*MAP_SIZE}else if(e===1){x=MAP_SIZE+20;y=Math.random()*MAP_SIZE}else if(e===2){x=Math.random()*MAP_SIZE;y=-20}else{x=Math.random()*MAP_SIZE;y=MAP_SIZE+20}
+            
+            const b = {
+                type: 'brute',
+                x:x, y:y, radius: 40, color: '#ff00ff', 
+                speed: 0.2 * GAME_SPEED, 
+                angle: 0, 
+                health: 2000, maxHealth: 2000, 
+                fireRate: 1500, lastShotTime: 0, 
+                isMegaBrute: true // Marqueur
+            };
+            try {
+                await addDoc(collection(db, `${dbGameDataRoot}/world_objects`), b); // CORRECTION
+            } catch(e) {}
+        }
+
+        // NOUVEAU: Spawn du Boss Ultra (Écrit sur DB)
+        async function spawnUltraBoss() {
+            const b = {
+                type: 'boss',
+                x: Math.random() * MAP_SIZE,
+                y: Math.random() * MAP_SIZE,
+                radius: 80, 
+                maxHealth: 30000, 
+                health: 30000, 
+                color: '#ff4400', 
+                speed: 0.3 * GAME_SPEED, 
+                angle: 0,
+                fireRate: 300, 
+                bombRate: 2000, 
+                laserRate: 4000, 
+                lastShotTime: 0,
+                lastBombTime: 0,
+                lastLaserTime: 0,
+                bulletSpeed: 5 * GAME_SPEED, 
+                bulletRadius: 10,
+                isUltraBoss: true, // Marqueur
+                level: "ULTRA" // NOUVEAU
+            };
+            bossSpawned = true; 
+            try {
+                await addDoc(collection(db, `${dbGameDataRoot}/world_objects`), b); // CORRECTION
+            } catch (e) {}
+        }
+        
+        function createStars(){stars=[];for(let i=0;i<numStars;i++){stars.push({x:Math.random()*canvas.width,y:Math.random()*canvas.height,speed:Math.random()*.25+.1})}}
+        function updateStars(){for(const s of stars){let speed=s.speed;if(controlState.thrust){speed*=4}s.y+=speed;if(s.y>canvas.height){s.y=0;s.x=Math.random()*canvas.width}}}
+        
+        function spawnThrusterParticle() {
+            if (!player || !gameSettings.particlesEnabled) return; // NOUVEAU
+            const particleCount = 2; // Plus de particules pour un meilleur effet
+            for (let i = 0; i < particleCount; i++) {
+                const a = player.angle + Math.PI + (Math.random() - 0.5) * 0.4; // Cône derrière le vaisseau
+                const s = Math.random() * 2 + 1.5; // Vitesse
+                particles.push({
+                    x: player.x - Math.cos(player.angle) * player.radius, // Position arrière
+                    y: player.y - Math.sin(player.angle) * player.radius, // Position arrière
+                    radius: Math.random() * 2 + 1.5,
+                    speedX: Math.cos(a) * s * GAME_SPEED,
+                    speedY: Math.sin(a) * s * GAME_SPEED,
+                    color: Math.random() > 0.3 ? "#ffaa00" : "#ff4400", // Orange et Rouge
+                    life: Math.random() * 20 + 20, // Courte durée de vie
+                    maxLife: 40
+                });
+            }
+        }
+
+        // NOUVEAU: Particules d'explosion (anciennement spawnParticle)
+        function spawnExplosionParticle(x, y, color = '#ffffff') {
+            if (!gameSettings.particlesEnabled) return; // NOUVEAU
+            const particleCount = 5;
+            for (let i = 0; i < particleCount; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const speed = Math.random() * 3 + 1;
+                particles.push({
+                    x: x, y: y,
+                    radius: Math.random() * 3 + 1,
+                    speedX: Math.cos(angle) * speed * GAME_SPEED,
+                    speedY: Math.sin(angle) * speed * GAME_SPEED,
+                    color: color,
+                    life: Math.random() * 30 + 20,
+                    maxLife: 50
+                });
+            }
+        }
+        
+        function updateParticles(){if (!gameSettings.particlesEnabled) {particles = []; return;} for(let i=particles.length-1;i>=0;i--){const p=particles[i];p.x+=p.speedX;p.y+=p.speedY;p.life--;if(p.life<=0){particles.splice(i,1)}}}
+        function updatePowerUps(){for(let i=powerUps.length-1;i>=0;i--){const p=powerUps[i];p.life--;if(p.life<=0){powerUps.splice(i,1)}}}
+        
+        // NOUVEAU: Écrit dans la DB (par l'hôte)
+        async function spawnPowerUp(){
+            const p = {
+                type: 'powerup',
+                x:Math.random()*(MAP_SIZE-50)+25,
+                y:Math.random()*(MAP_SIZE-50)+25,
+                radius:10,
+                life:POWERUP_MAX_LIFE
+            };
+            try {
+                await addDoc(collection(db, `${dbGameDataRoot}/world_objects`), p); // CORRECTION
+            } catch(e) {}
+        }
+        
+        // NOUVEAU: Spawn de météorites (par l'hôte)
+        async function spawnRandomMeteorite() {
+            if (!player) return;
+
+            const spawnDistance = 1000; 
+            const angle = Math.random() * Math.PI * 2;
+            
+            const x = player.x + Math.cos(angle) * spawnDistance;
+            const y = player.y + Math.sin(angle) * spawnDistance;
+
+            const a = {
+                type: 'asteroid',
+                radius:Math.random()*15+10,
+                x:x,
+                y:y,
+                speedX:(Math.random()-.5)*0.7*GAME_SPEED,
+                speedY:(Math.random()-.5)*0.7*GAME_SPEED
+            };
+            
+             try {
+                await addDoc(collection(db, `${dbGameDataRoot}/world_objects`), a); // CORRECTION
+            } catch(e) {}
+        }
+        
+        function updateSpawners(){
+            alienSpawnTimer+=16;if(alienSpawnTimer>=alienSpawnInterval){alienSpawnTimer=0;spawnAlien()}
+            powerUpSpawnTimer+=16;if(powerUpSpawnTimer>=powerUpSpawnInterval){powerUpSpawnTimer=0;spawnPowerUp()} // CORRECTION: powerUpSpawnTimer
+            
+            // NOUVEAU: Spawn des Brutes (local à l'hôte)
+            if (player.score >= BRUTE_SPAWN_SCORE && !bruteSpawned && bruteAliens.length === 0 && !currentEvent) {
+                spawnBruteAlien();
+                bruteSpawned = true; 
+            }
+
+            // NOUVEAU: Spawn continu de météorites
+            meteoriteSpawnTimer+=16;
+            if(meteoriteSpawnTimer>=METEORITE_SPAWN_INTERVAL){
+                meteoriteSpawnTimer = 0;
+                spawnRandomMeteorite();
+            }
+        }
+        
+        // --- Collisions ---
+        function checkCollisions(){if(!player)return;let scoreGained=0;
+            
+            // Boucle de destruction d'ennemis
+            for(let i=bullets.length-1;i>=0;i--){
+                let bulletDestroyed = false;
+                const bullet = bullets[i];
+                
+                if (bullet.isCosmetic) continue; 
+                if (bullet.isBossBullet || bullet.isBruteBullet || bullet.isAlienBullet) continue; // Tirs amis
+
+                // Collision Boss (si existe)
+                for(let k=bosses.length-1;k>=0;k--){ // NOUVEAU: Boucle sur les boss
+                    const boss = bosses[k];
+                    if (getDistance(bullet, boss) < bullet.radius + boss.radius) {
+                        boss.health -= player.upgrades.bulletDamage; // Dégâts améliorés
+                        spawnExplosionParticle(bullet.x, bullet.y, '#ffff00');
+                        if(audioReady) explosionSound.triggerAttackRelease("0.2"); 
+                        if (boss.health <= 0) {
+                            spawnExplosionParticle(boss.x, boss.y, '#ff8800');
+                            
+                            if (boss.isUltraBoss) {
+                                player.score += 50000; 
+                                showSuccessAlert(translations[currentLang].success_ultra_boss); // NOUVEAU
+                            } else {
+                                player.score += 15000;
+                                showSuccessAlert(translations[currentLang].success_boss); // NOUVEAU
+                            }
+                            
+                            syncObjectRemoval(boss.id); // NOUVEAU: Synchro
+                            bosses.splice(k, 1); // Retirer localement
+                            bossSpawned = false; 
+                            currentEvent = null; 
+                        }
+                        bullets.splice(i, 1);
+                        bulletDestroyed = true;
+                        break; // Le tir est détruit
+                    }
+                }
+                if(bulletDestroyed) continue;
+                
+                // Collision Tirs vs Brutes
+                for(let j=bruteAliens.length-1;j>=0;j--){
+                    if(getDistance(bullet,bruteAliens[j])<bullet.radius+bruteAliens[j].radius){
+                        bruteAliens[j].health -= player.upgrades.bulletDamage; 
+                        spawnExplosionParticle(bullet.x, bullet.y, '#ff00ff');
+                        if(audioReady) explosionSound.triggerAttackRelease("0.2"); 
+                        if (bruteAliens[j].health <= 0) {
+                            spawnExplosionParticle(bruteAliens[j].x, bruteAliens[j].y, '#800080');
+                            syncObjectRemoval(bruteAliens[j].id); // NOUVEAU: Synchro
+                            
+                            if (bruteAliens[j].isMegaBrute) {
+                                scoreGained += 1500; 
+                                currentEvent = null; 
+                                showSuccessAlert(translations[currentLang].success_mega_brute); // NOUVEAU
+                            } else {
+                                scoreGained += 250;
+                            }
+                            
+                            bruteAliens.splice(j,1);
+                            player.killCount++;
+                        }
+                        bulletDestroyed=true;
+                        break;
+                    }
+                }
+                if(bulletDestroyed) {bullets.splice(i,1); continue;}
+                
+                // Collisions Tirs vs Astéroïdes
+                for(let j=asteroids.length-1;j>=0;j--){
+                    if(getDistance(bullet,asteroids[j])<bullet.radius+asteroids[j].radius){
+                        createDebris(asteroids[j].x, asteroids[j].y, asteroids[j].radius);spawnExplosionParticle(asteroids[j].x, asteroids[j].y, '#ffffff');
+                        if(audioReady) explosionSound.triggerAttackRelease("0.2"); 
+                        syncObjectRemoval(asteroids[j].id); // NOUVEAU: Synchro
+                        asteroids.splice(j,1);scoreGained+=10;bulletDestroyed=true;break;
+                    }
+                }
+                if(bulletDestroyed) {bullets.splice(i,1); continue;}
+                
+                // Collisions Tirs vs Aliens
+                for(let j=aliens.length-1;j>=0;j--){
+                    if(getDistance(bullet,aliens[j])<bullet.radius+aliens[j].radius){
+                        aliens[j].health -= player.upgrades.bulletDamage; 
+                        spawnExplosionParticle(bullet.x, bullet.y, '#ff8888');
+                        if(audioReady) explosionSound.triggerAttackRelease("0.2"); 
+                        
+                        if (aliens[j].health <= 0) {
+                            spawnExplosionParticle(aliens[j].x, aliens[j].y, '#ff0000');
+                            syncObjectRemoval(aliens[j].id); // NOUVEAU: Synchro
+                            aliens.splice(j,1);
+                            scoreGained+=50;
+                            player.killCount++;
+
+                            // --- NOUVELLE LOGIQUE D'INVASION ---
+                            if (currentEvent && currentEvent.type === "invasion") {
+                                invasionKillsNeeded--;
+                                if (invasionKillsNeeded <= 0) {
+                                    currentEvent = null;
+                                    invasionKillsNeeded = 0;
+                                    showSuccessAlert(translations[currentLang].success_invasion);
+                                } else {
+                                    // Mettre à jour l'alerte
+                                    showEventAlert(translations[currentLang].alert_invasion_remaining.replace('{kills}', invasionKillsNeeded));
+                                }
+                            }
+                            // --- FIN NOUVELLE LOGIQUE ---
+
+                        }
+                        bulletDestroyed=true;
+                        break;
+                    }
+                }
+                if(bulletDestroyed) {bullets.splice(i,1);}
+            }
+            
+            // Collisions avec le joueur
+            for(let i=asteroids.length-1; i>=0; i--){
+                if(getDistance(player,asteroids[i])<player.radius+asteroids[i].radius){
+                    playerHit(10);
+                    syncObjectRemoval(asteroids[i].id); // NOUVEAU: Synchro
+                    asteroids.splice(i, 1);
+                }
+            }
+            for(let i=aliens.length-1; i>=0; i--){
+                if(getDistance(player,aliens[i])<player.radius+aliens[i].radius){
+                    playerHit(20);
+                    syncObjectRemoval(aliens[i].id); // NOUVEAU: Synchro
+                    aliens.splice(i, 1);
+                }
+            }
+            for(let i=bruteAliens.length-1; i>=0; i--){
+                if(getDistance(player,bruteAliens[i])<player.radius+bruteAliens[i].radius){
+                    playerHit(50);
+                }
+            }
+            
+            // Tirs ennemis vs Joueur
+            for(let i=bullets.length-1;i>=0;i--){
+                const bullet = bullets[i];
+                if (bullet.isBossBullet || bullet.isBruteBullet || bullet.isAlienBullet) {
+                    if (getDistance(player, bullet) < player.radius + bullet.radius) {
+                        playerHit(bullet.isBossBullet ? 50 : (bullet.isBruteBullet ? 30 : 10)); 
+                        bullets.splice(i, 1);
+                    }
+                }
+            }
+            
+            // Laser vs Joueur
+            for (const wall of laserWalls) {
+                const distToWall = Math.abs((wall.y2 - wall.y1) * player.x - (wall.x2 - wall.x1) * player.y + wall.x2 * wall.y1 - wall.y2 * wall.x1) / 
+                                   Math.sqrt(Math.pow(wall.y2 - wall.y1, 2) + Math.pow(wall.x2 - wall.x1, 2));
+                
+                if (wall.isAlienLaser && distToWall < player.radius + 5) { // Laser alien plus fin
+                    playerHit(15); 
+                } else if (wall.isBossLaser && distToWall < player.radius + 15) { // Laser boss large
+                    playerHit(75); 
+                }
+            }
+            
+            // Joueur vs PowerUp
+            for(let i=powerUps.length-1;i>=0;i--){
+                const p = powerUps[i];
+                if(getDistance(player,p)<player.radius+p.radius){
+                    activateShield();
+                    syncObjectRemoval(p.id); // NOUVEAU: Synchro
+                    powerUps.splice(i,1);
+                }
+            }
+            
+            if(scoreGained>0)player.score+=scoreGained;updateDebris()
+        }
+        function playerHit(damage){if(!player||player.shieldActive)return;player.health-=damage;
+            // CORRECTION: HitSound est retiré pour éviter l'erreur Tone.js car il est déclenché trop souvent
+            // if(audioReady) hitSound.triggerAttackRelease("A3", "0.2"); 
+            if(player.health<=0){player.health=0;triggerGameOver()}}
+        function activateShield(){if(!player)return;player.shieldActive=true;player.shieldTimer=SHIELD_DURATION} // CORRECTION: Durée de 20s
+        
+        // NOUVEAU: Logique de fin de partie séparée
+        async function handleGameOverLogic() {
+            await saveGame(true);
+            await updateLeaderboard(player.playerName, player.score);
+        }
+        
+        async function triggerGameOver() {
+            gameIsOver = true;
+            let scoreGained = player.score - (player.levelStartScore || player.score); 
+            finalScoreDisplay.innerText = translations[currentLang].game_over_score.replace('{score}', scoreGained);
+            
+            await handleGameOverLogic();
+
+            setGameState('GAMEOVER');
+            currentEvent = null; // NOUVEAU: Réinitialiser
+        }
+        
+        // --- Fonctions utilitaires ---
+        function getDistance(o1,o2){if(!o1||!o2)return 1000;const dx=o1.x-o2.x,dy=o1.y-o2.y;return Math.sqrt(dx*dx+dy*dy)}
+        
+        // NOUVEAU: Wrap pour un monde infini (plus grand que l'écran)
+        function wrapCoordinates(obj, width, height) {
+            if (obj.x < -obj.radius) obj.x = width + obj.radius;
+            if (obj.x > width + obj.radius) obj.x = -obj.radius;
+            if (obj.y < -obj.radius) obj.y = height + obj.radius;
+            if (obj.y > height + obj.radius) obj.y = -obj.radius;
+        }
+
+        window.addEventListener('resize',()=>{canvas.width=window.innerWidth;canvas.height=window.innerHeight;stars=[];createStars()});
+
+        // --- Initialisation et Sauvegarde ---
+        window.addEventListener('load', init);
+        
+        async function init() { // Rendre init async
+            canvas = document.getElementById('gameCanvas');
+            ctx = canvas.getContext('2d');
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            
+            getUIElements(); // IMPORTANT: Récupérer les éléments AVANT de les utiliser
+
+            // Démarrer l'audio sur la première interaction utilisateur
+            document.body.addEventListener('click', () => {
+                if (typeof Tone !== 'undefined' && Tone.context.state !== 'running') {
+                    Tone.context.resume();
+                }
+                if (!audioReady) {
+                    initAudio();
+                }
+            }, { once: true });
+            
+            setupControls();
+            setupNavigationListeners(); // Mettre TOUS les listeners en place
+
+            // --- NOUVELLE Logique d'authentification ---
+            try {
+                if (typeof window.initAuth === 'function') {
+                    // Tenter la connexion auto (token ou anonyme)
+                    const user = await window.initAuth(); 
+                    
+                    if (user) {
+                        // L'utilisateur était déjà connecté
+                        await handleUserConnected(user);
+                    } else {
+                        // Devrait être impossible avec la nouvelle logique initAuth, mais par sécurité :
+                        console.error("Échec de la connexion anonyme/token.");
+                        document.getElementById('user-id-display').innerText = `ERREUR DE CONNEXION.`;
+                        if (playButton) playButton.disabled = true;
+                        if (shopButton) shopButton.disabled = true;
+                        if (multiplayerButton) multiplayerButton.disabled = true;
+                    }
+                } else {
+                    console.error("initAuth n'est pas défini.");
+                }
+            } catch (error) {
+                console.error("Erreur critique lors de l'authentification:", error);
+                document.getElementById('user-id-display').innerText = `ERREUR DE CONNEXION.`;
+            }
+        }
+        
+        // NOUVELLE Fonction: Centralise la logique post-connexion
+        async function handleUserConnected(user) {
+            userId = user.uid;
+            db = window.db; 
+            auth = window.auth;
+            appId = window.appId;
+            
+            // CORRECTION: Définir les chemins de la DB ICI
+            dbGameDataRoot = `artifacts/${appId}/public/data`; // CORRECTION: Chemin du DOCUMENT 'data'
+            dbUserDataRoot = `artifacts/${appId}/users/${userId}`; // CORRECTION: Chemin de la COLLECTION '{userId}'
+        
+            document.getElementById('user-id-display').innerText = `ID: ${userId}`;
+    
+            await loadGame(); // Charger les données
+            
+            // NOUVEAU: Appliquer les paramètres chargés
+            gameSettings = player.gameSettings || defaultSaveData.gameSettings; // Sécurité
+            if (mainVolume) { // S'assurer que l'audio est initialisé
+                mainVolume.volume.value = gameSettings.volume;
+            }
+            if (volumeSlider) {
+                volumeSlider.value = gameSettings.volume;
+            }
+            
+            // NOUVEAU: Appliquer la langue
+            currentLang = gameSettings.language || 'fr';
+            setLanguage(currentLang);
+            if (languageSelect) languageSelect.value = currentLang;
+            
+            updateAllUI(); // Mettre à jour l'UI (y compris le texte du bouton particules)
+            
+            // Activer les boutons
+            if (playButton) playButton.disabled = false;
+            if (shopButton) shopButton.disabled = false;
+            if (multiplayerButton) multiplayerButton.disabled = false;
+            if (googleSignInButton) googleSignInButton.style.display = 'none'; // Cacher au cas où
+        }
+        
+        async function loadGame() {
+            if (!db || !userId || typeof window.doc === 'undefined') {
+                console.error("Dépendances Firebase non prêtes. Utilisation des données par défaut.");
+                player = { ...JSON.parse(JSON.stringify(defaultSaveData)) };
+                setGameState('MENU');
+                return;
+            }
+            
+            const docRef = doc(db, `${dbUserDataRoot}/game_save`, "playerData"); // CORRECTION
+            try {
+                const docSnap = await getDoc(docRef);
+                
+                if (docSnap.exists()) {
+                    console.log("Données chargées !");
+                    
+                    // CORRECTION: Fusionner l'ancienne sauvegarde avec les nouvelles valeurs par défaut
+                    let savedData = docSnap.data();
+                    let newPlayer = JSON.parse(JSON.stringify(defaultSaveData));
+                    Object.assign(newPlayer, savedData);
+                    
+                    // CORRECTION: Gérer 'null' ou 'undefined' pour les objets imbriqués
+                    newPlayer.upgrades = { ...defaultSaveData.upgrades, ...(savedData.upgrades || {}) };
+                    newPlayer.upgradeCosts = { ...defaultSaveData.upgradeCosts, ...(savedData.upgradeCosts || {}) };
+                    newPlayer.skinsOwned = { ...defaultSaveData.skinsOwned, ...(savedData.skinsOwned || {}) };
+                    newPlayer.gameSettings = { ...defaultSaveData.gameSettings, ...(savedData.gameSettings || {}) }; // NOUVEAU
+                    
+                    player = newPlayer;
+                    
+                    // S'assurer que les nouvelles propriétés de base existent
+                    if (player.killCount === undefined) player.killCount = 0;
+                    if (player.upgrades.radius === undefined) player.upgrades.radius = defaultSaveData.upgrades.radius;
+                    if (player.upgrades.bulletDamage === undefined) player.upgrades.bulletDamage = defaultSaveData.upgrades.bulletDamage;
+                    if (player.upgrades.healthRegen === undefined) player.upgrades.healthRegen = defaultSaveData.upgrades.healthRegen;
+                    if (player.upgradeCosts.radius === undefined) player.upgradeCosts.radius = defaultSaveData.upgradeCosts.radius;
+                    if (player.upgradeCosts.bulletDamage === undefined) player.upgradeCosts.bulletDamage = defaultSaveData.upgradeCosts.bulletDamage;
+                    if (player.upgradeCosts.healthRegen === undefined) player.upgradeCosts.healthRegen = defaultSaveData.upgradeCosts.healthRegen;
+
+
+                } else {
+                    console.log("Aucune sauvegarde, création d'une nouvelle.");
+                    player = { ...JSON.parse(JSON.stringify(defaultSaveData)) };
+                    await saveGame(true); 
+                }
+            } catch (error) {
+                console.error("Erreur de chargement:", error);
+                player = { ...JSON.parse(JSON.stringify(defaultSaveData)) };
+            }
+            
+            setGameState('MENU');
+            // Les boutons sont activés dans init() après la fin de loadGame
+        }
+
+        async function saveGame(forceSave = false) {
+            // Sauvegarde uniquement si on est en jeu ou si on force (ex: GameOver)
+            if (gameState !== 'GAME' && !forceSave) return; 
+            if (!db || !userId || !player || typeof window.setDoc === 'undefined') {
+                console.log("Sauvegarde impossible: DB/User/Player non prêt ou setDoc non défini.");
+                return;
+            }
+            const dataToSave = {
+                score: player.score, 
+                killCount: player.killCount,
+                skin: player.skin, 
+                hasAutoTurret: player.hasAutoTurret,
+                upgrades: player.upgrades, 
+                upgradeCosts: player.upgradeCosts,
+                shopCosts: player.shopCosts, 
+                skinsOwned: player.skinsOwned,
+                playerName: player.playerName,
+                gameSettings: gameSettings // NOUVEAU: Sauvegarder les paramètres
+            };
+            const docRef = doc(db, `${dbUserDataRoot}/game_save`, "playerData"); // CORRECTION
+            try {
+                await setDoc(docRef, dataToSave);
+            } catch (error) {
+                console.error("Erreur de sauvegarde:", error);
+            }
+        }
+        
+        // NOUVEAU: Met à jour le classement public
+        async function updateLeaderboard(name, totalScore) {
+            if (!db || !userId || typeof window.setDoc === 'undefined' || !dbGameDataRoot) return;
+            
+            const leaderboardDocRef = doc(db, `${dbGameDataRoot}/leaderboard`, userId); // CORRECTION
+            try {
+                 // Ne met à jour le score que si le nouveau score est plus élevé
+                await setDoc(leaderboardDocRef, {
+                    playerName: name,
+                    score: totalScore,
+                    lastUpdated: Date.now()
+                }, { merge: true });
+            } catch (error) {
+                console.error("Erreur de mise à jour du classement:", error);
+            }
+        }
+        
+        // NOUVEAU: Fonction de traduction
+        function setLanguage(lang) {
+            if (!translations[lang]) return;
+            currentLang = lang;
+            
+            // 1. Traduire tous les éléments statiques avec data-lang
+            document.querySelectorAll('[data-lang]').forEach(el => {
+                const key = el.getAttribute('data-lang');
+                if (translations[lang][key]) {
+                    el.innerText = translations[lang][key];
+                }
+            });
+            
+            // 2. Traduire les placeholders
+            document.querySelectorAll('[data-lang-placeholder]').forEach(el => {
+                const key = el.getAttribute('data-lang-placeholder');
+                if (translations[lang][key]) {
+                    el.placeholder = translations[lang][key];
+                }
+            });
+            
+            // 3. Mettre à jour tout le texte dynamique
+            updateAllUI();
+            
+            // 4. Sauvegarder le paramètre
+            gameSettings.language = lang;
+            saveGame(true); // Forcer la sauvegarde des paramètres
+        }
+        
+    </script>
+</body>
+</html>
